@@ -128,7 +128,7 @@ async def _collect_messages(
 
                 # Create the Splunk event
                 event: dict[str, Any] = {
-                    "_time": msg.metadata.timestamp.timestamp(),
+                    "_time": time.time(),
                     "_raw": data_str,
                     "source": msg.subject,
                     "sourcetype": "nats:topic",

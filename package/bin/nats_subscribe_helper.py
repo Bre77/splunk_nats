@@ -12,6 +12,7 @@ import os
 import asyncio
 import base64
 import logging
+import time
 from typing import Dict, Any, Optional
 
 # Add the lib directory to Python path
@@ -161,7 +162,7 @@ async def _subscribe_to_nats(
                 # Create the Splunk event with only the message data in _raw
                 event = smi.Event(
                     data=data_str,
-                    time=msg.metadata.timestamp.timestamp(),
+                    time=time.time(),
                     source=msg.subject,
                     sourcetype=sourcetype,
                     host=connected_host,
