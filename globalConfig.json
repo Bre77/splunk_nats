@@ -185,7 +185,7 @@
                         }
                     ],
                     "inputHelperModule": "nats_subscribe_helper",
-                    "title": "nats_subscribe"
+                    "title": "NATS Subscribe"
                 },
                 {
                     "name": "nats_kv",
@@ -282,7 +282,7 @@
                         }
                     ],
                     "inputHelperModule": "nats_kv_helper",
-                    "title": "nats_kv"
+                    "title": "NATS KV"
                 }
             ],
             "title": "Inputs",
