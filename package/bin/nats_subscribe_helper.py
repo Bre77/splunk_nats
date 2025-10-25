@@ -7,7 +7,6 @@ This module provides the input helper functions for collecting data from NATS to
 UCC will call validate_input() during configuration validation and stream_events() during data collection.
 """
 
-import time
 import sys
 import os
 import asyncio
@@ -19,6 +18,7 @@ from typing import Dict, Any, Optional
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 # Import Splunk libraries
+from nats.aio.msg import Msg
 from splunklib import modularinput as smi
 from solnlib import conf_manager
 import nats
@@ -123,7 +123,6 @@ async def _subscribe_to_nats(
         event_writer: EventWriter for outputting events
     """
     nc = None
-    message_count = 0
 
     try:
         # Connection options
@@ -141,31 +140,40 @@ async def _subscribe_to_nats(
         nc = await nats.connect(servers=server_list, **connect_options)
 
         # Message handler that writes events directly
-        async def message_handler(msg):
-            nonlocal message_count
-            message_data = {
-                "subject": msg.subject,
-                "data": msg.data,
-                "reply": msg.reply,
-                "headers": dict(msg.headers) if msg.headers else None,
-                "received_time": time.time(),
-            }
+        async def message_handler(msg: Msg):
+            try:
+                # Get the connected server URL for the host field
+                connected_host = "unknown"
+                if nc.connected_url:
+                    connected_host = nc.connected_url.netloc
 
-            # Get the connected server URL for the host field
-            connected_host = "unknown"
-            if nc.connected_url:
-                connected_host = nc.connected_url.netloc
+                # Handle the message data - decode to string for _raw
+                if msg.data:
+                    try:
+                        # Try to decode as UTF-8
+                        data_str = msg.data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        # If it's not valid UTF-8, encode as base64
+                        data_str = base64.b64encode(msg.data).decode("ascii")
+                else:
+                    data_str = ""
 
-            # Create event
-            event = _create_event(
-                message_data,
-                input_name,
-                sourcetype,
-                connected_host,
-            )
-            if event:
+                # Create the Splunk event with only the message data in _raw
+                event = smi.Event(
+                    data=data_str,
+                    time=msg.metadata.timestamp.timestamp(),
+                    source=msg.subject,
+                    sourcetype=sourcetype,
+                    host=connected_host,
+                )
+
                 event_writer.write_event(event)
-                message_count += 1
+
+            except Exception as e:
+                # Log error
+                logger.error(
+                    f"Failed to process NATS message from subject '{msg.subject}': {str(e)}"
+                )
 
         # Subscribe to the subject
         sub = await nc.subscribe(subject, cb=message_handler)
@@ -190,41 +198,6 @@ async def _subscribe_to_nats(
                 await nc.close()
             except Exception:
                 pass
-
-
-def _create_event(
-    message_data: Dict[str, Any], input_name: str, sourcetype: str, server: str
-) -> smi.Event:
-    """Convert a NATS message to a Splunk event"""
-    try:
-        # Handle the message data - decode to string for _raw
-        if message_data["data"]:
-            try:
-                # Try to decode as UTF-8
-                data_str = message_data["data"].decode("utf-8")
-            except UnicodeDecodeError:
-                # If it's not valid UTF-8, encode as base64
-                data_str = base64.b64encode(message_data["data"]).decode("ascii")
-        else:
-            data_str = ""
-
-        # Create the Splunk event with only the message data in _raw
-        event = smi.Event(
-            data=data_str,
-            time=message_data["received_time"],
-            source=message_data["subject"],
-            sourcetype=sourcetype,
-            host=server,
-        )
-
-        return event
-
-    except Exception as e:
-        # Log error and return None instead of error event
-        logger.error(
-            f"Failed to process NATS message from subject '{message_data.get('subject', 'unknown')}': {str(e)}"
-        )
-        return None
 
 
 def _get_account_config(

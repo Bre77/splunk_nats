@@ -52,7 +52,10 @@ def validate_input(definition: smi.ValidationDefinition) -> None:
             raise ValueError("Account is required")
 
         # Validate bucket name (basic validation)
-        if not bucket.replace("_", "").replace("-", "").replace(".", "").isalnum():
+        valid_chars = set(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        )
+        if not all(c in valid_chars for c in bucket):
             raise ValueError(
                 "Bucket name must contain only alphanumeric characters, hyphens, underscores, and periods"
             )
@@ -97,7 +100,6 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             # Monitor NATS JetStream KV bucket
             asyncio.run(
                 _monitor_kv_bucket(
-                    input_name=input_name,
                     bucket=bucket,
                     subject=subject,
                     account_config=account_config,
@@ -112,7 +114,6 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
 
 
 async def _monitor_kv_bucket(
-    input_name: str,
     bucket: str,
     subject: str,
     account_config: Dict[str, Any],
@@ -123,7 +124,6 @@ async def _monitor_kv_bucket(
     Monitor NATS JetStream KV bucket for changes.
 
     Args:
-        input_name: Name of the input
         bucket: KV bucket name
         subject: Subject pattern to watch
         account_config: Account configuration dictionary
@@ -143,8 +143,6 @@ async def _monitor_kv_bucket(
             connect_options["user"] = account_config["username"]
             connect_options["password"] = account_config["password"]
 
-        # No connection timeout for continuous monitoring
-
         # Connect to NATS
         nc = await nats.connect(servers=server_list, **connect_options)
 
@@ -152,59 +150,39 @@ async def _monitor_kv_bucket(
         js = nc.jetstream()
         kv = await js.key_value(bucket)
 
-        # Use KV watcher to monitor changes in real-time
-        try:
-            # Create a watcher for the subject pattern
-            watcher = await kv.watch(subject, include_history=True)
+        # Get the connected server URL for the host field
+        connected_host = "unknown"
+        if nc.connected_url:
+            connected_host = nc.connected_url.netloc
 
-            # Get the connected server URL for the host field
-            connected_host = "unknown"
-            if nc.connected_url:
-                connected_host = nc.connected_url.netloc
+        # Create a watcher for the subject pattern
+        watcher = await kv.watch(subject, include_history=True)
 
-            # Write start monitoring event
-            start_event = smi.Event(
-                data=f"Started watching KV bucket '{bucket}' with pattern '{subject}'",
-                time=time.time(),
-                source=f"{bucket}.{subject}",
-                sourcetype="nats:kv_watch_start",
+        # Process watcher events
+        async for entry in watcher:
+            if entry is None or not entry.value:
+                continue
+
+            # Determine the raw value to write
+            try:
+                raw_value = entry.value.decode("utf-8")
+            except UnicodeDecodeError:
+                raw_value = base64.b64encode(entry.value).decode("ascii")
+
+            # Create and write the Splunk event
+            event = smi.Event(
+                data=raw_value,
+                time=entry.created or time.time(),
+                source=f"{bucket}.{entry.key}",
+                sourcetype=sourcetype,
                 host=connected_host,
             )
-            event_writer.write_event(start_event)
 
-            # Process watcher events
-            async for entry in watcher:
-                if entry is None or not entry.value:
-                    # Initial callback when starting the watch with no pending updates
-                    continue
-
-                # Determine the raw value to write
-                try:
-                    raw_value = entry.value.decode("utf-8")
-                except UnicodeDecodeError:
-                    raw_value = base64.b64encode(entry.value).decode("ascii")
-
-                # Create and write the Splunk event
-                event = smi.Event(
-                    data=raw_value,
-                    time=entry.created.timestamp() if entry.created else time.time(),
-                    source=f"{bucket}.{entry.key}",
-                    sourcetype=sourcetype,
-                    host=connected_host,
-                )
-
-                event_writer.write_event(event)
-
-        except Exception as e:
-            # Log error instead of writing as event
-            logger.error(
-                f"Failed to watch KV bucket '{bucket}' with pattern '{subject}': {str(e)}"
-            )
+            event_writer.write_event(event)
 
     except Exception as e:
-        # Log error instead of writing as event
         logger.error(
-            f"Failed to connect to NATS or access KV bucket '{bucket}' with pattern '{subject}': {str(e)}"
+            f"Failed to monitor KV bucket '{bucket}' with pattern '{subject}': {str(e)}"
         )
 
     finally:
@@ -248,7 +226,3 @@ def _get_account_config(
         raise Exception(
             f"Failed to get account configuration '{account_name}': {str(e)}"
         )
-
-
-# Subject pattern matching is now handled by the NATS KV watcher directly
-# The watcher accepts NATS subject patterns and handles wildcards internally

@@ -33,7 +33,6 @@ def generate(command_instance):
         bucket = getattr(command_instance, "bucket", None)
         key = getattr(command_instance, "key", None)
         account = getattr(command_instance, "account", None)
-        limit = getattr(command_instance, "limit", 100)
 
         # Validate required parameters
         if not bucket:
@@ -47,13 +46,6 @@ def generate(command_instance):
 
         # Get logger if available
         logger = getattr(command_instance, "logger", None)
-        if logger:
-            logger.info(
-                "NATS KV command starting: bucket='%s', key='%s', account='%s'",
-                bucket,
-                key,
-                account,
-            )
 
         # Get account configuration
         account_config = _get_account_config(command_instance, account)
@@ -62,37 +54,10 @@ def generate(command_instance):
 
         # Run the async function to get KV history
         try:
-            entries = asyncio.run(
-                _get_kv_history(bucket, key, account_config, limit, logger)
-            )
-
-            # Convert entries to Splunk events
-            if not entries:
-                if logger:
-                    logger.info(
-                        "No entries found for key '%s' in bucket '%s'",
-                        key,
-                        bucket,
-                    )
-                return
-
-            if logger:
-                logger.info("Processing %d entries into Splunk events", len(entries))
-
-            # Get server for host field - use first server from servers list
-            servers = account_config.get("servers", "nats://localhost:4222")
-            server_host = servers.split(",")[0].strip()
-
-            # Convert entries to Splunk events
-            event_count = 0
-            for entry in entries:
-                event = _create_event(entry, bucket, server_host)
-                if event:
-                    yield event
-                    event_count += 1
-
-            if logger:
-                logger.info("Successfully processed %d events", event_count)
+            for event in asyncio.run(
+                _get_kv_history(bucket, key, account_config, logger)
+            ):
+                yield event
 
         except Exception as e:
             if logger:
@@ -103,7 +68,7 @@ def generate(command_instance):
         raise RuntimeError(str(e))
 
 
-async def _get_kv_history(bucket, key, account_config, limit, logger=None):
+async def _get_kv_history(bucket, key, account_config, logger=None):
     """
     Async function to connect to NATS and retrieve KV history
 
@@ -111,11 +76,10 @@ async def _get_kv_history(bucket, key, account_config, limit, logger=None):
         bucket: KV bucket name
         key: Key to get history for
         account_config: Account configuration dictionary
-        limit: Maximum number of entries to retrieve
         logger: Optional logger instance
 
-    Returns:
-        List of KV entries
+    Yields:
+        Event dictionaries for Splunk
     """
     nc = None
     try:
@@ -129,43 +93,60 @@ async def _get_kv_history(bucket, key, account_config, limit, logger=None):
         if account_config.get("username") and account_config.get("password"):
             connect_options["user"] = account_config["username"]
             connect_options["password"] = account_config["password"]
-            if logger:
-                logger.debug("Using authentication credentials")
 
         # Set connection timeout
         connect_options["connect_timeout"] = account_config.get("connect_timeout", 30)
 
         # Connect to NATS
-        if logger:
-            logger.debug("Connecting to NATS servers: %s", server_list)
         nc = await nats.connect(servers=server_list, **connect_options)
+
+        # Get the connected server URL for the host field
+        connected_host = "unknown"
+        if nc.connected_url:
+            connected_host = nc.connected_url.netloc
 
         # Get JetStream context and KV bucket
         js = nc.jetstream()
         kv = await js.key_value(bucket)
-        if logger:
-            logger.debug("Connected to KV bucket: %s", bucket)
 
         # Get the history for the key
         try:
             entries = await kv.history(key)
-            if logger:
-                logger.debug(
-                    "Retrieved %d historical entries for key '%s'",
-                    len(entries),
-                    key,
-                )
 
-            # Apply limit if specified
-            if limit and limit > 0:
-                entries = entries[:limit]
+            # Convert entries to Splunk events
+            for entry in entries:
+                try:
+                    # Handle the value - decode to string for _raw
+                    if entry.value:
+                        try:
+                            value_str = entry.value.decode("utf-8")
+                        except UnicodeDecodeError:
+                            value_str = base64.b64encode(entry.value).decode("ascii")
+                    else:
+                        value_str = ""
 
-            return entries
+                    # Create the Splunk event
+                    event = {
+                        "_time": entry.created or time.time(),
+                        "_raw": value_str,
+                        "source": f"{entry.bucket}.{entry.key}",
+                        "sourcetype": "nats:kv:history",
+                        "host": connected_host,
+                        "bucket": entry.bucket,
+                        "key": entry.key,
+                        "revision": entry.revision,
+                        "operation": entry.operation or "PUT",
+                    }
+
+                    yield event
+
+                except Exception as e:
+                    if logger:
+                        logger.error("Failed to process entry: %s", str(e))
 
         except (KeyNotFoundError, NoKeysError):
-            if logger:
-                logger.debug("Key '%s' not found in bucket '%s'", key, bucket)
-            return []
+            # No entries found - just return without yielding anything
+            pass
 
     except Exception as e:
         if logger:
@@ -175,53 +156,8 @@ async def _get_kv_history(bucket, key, account_config, limit, logger=None):
         if nc:
             try:
                 await nc.close()
-                if logger:
-                    logger.debug("NATS connection closed")
-            except Exception as e:
-                if logger:
-                    logger.error("Error closing NATS connection: %s", str(e))
-
-
-def _create_event(entry, bucket, server):
-    """Convert a KV entry to a Splunk event"""
-    try:
-        # Handle the value - decode to string for _raw
-        if entry.value:
-            try:
-                # Try to decode as UTF-8
-                value_str = entry.value.decode("utf-8")
-            except UnicodeDecodeError:
-                # If it's not valid UTF-8, encode as base64
-                value_str = base64.b64encode(entry.value).decode("ascii")
-        else:
-            value_str = ""
-
-        # Create the Splunk event
-        event = {
-            "_time": entry.created.timestamp() if entry.created else time.time(),
-            "_raw": value_str,
-            "source": f"{entry.bucket}.{entry.key}",
-            "sourcetype": "nats:kv:history",
-            "host": server,
-            "bucket": entry.bucket,
-            "key": entry.key,
-            "revision": entry.revision,
-            "operation": entry.operation or "PUT",
-        }
-
-        return event
-
-    except Exception as e:
-        return {
-            "_time": time.time(),
-            "_raw": f"Failed to process entry: {str(e)}",
-            "source": f"{bucket}.{getattr(entry, 'key', 'unknown')}",
-            "sourcetype": "nats:kv:error",
-            "host": server,
-            "bucket": bucket,
-            "key": getattr(entry, "key", "unknown"),
-            "error_type": "entry_processing_error",
-        }
+            except Exception:
+                pass
 
 
 def _get_account_config(command_instance, account_name):

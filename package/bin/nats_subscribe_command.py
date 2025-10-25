@@ -4,6 +4,8 @@ import sys
 import os
 import asyncio
 import time
+from typing import Any
+from collections.abc import Generator
 
 # Add the lib directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
@@ -12,10 +14,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 # UCC generates the command wrapper automatically
 import base64
 import nats
+from nats.aio.msg import Msg
 from solnlib import conf_manager
 
 
-def generate(command_instance):
+def generate(command_instance: Any) -> Generator[dict[str, Any], None, None]:
     """
     Generate function for NATS subscribe command.
     This function will be called by the UCC-generated wrapper.
@@ -28,8 +31,8 @@ def generate(command_instance):
     """
     try:
         # Get command arguments
-        subject = getattr(command_instance, "subject", None)
-        account = getattr(command_instance, "account", None)
+        subject: str | None = getattr(command_instance, "subject", None)
+        account: str | None = getattr(command_instance, "account", None)
 
         # Validate required parameters
         if not subject:
@@ -52,22 +55,19 @@ def generate(command_instance):
         if not account_config:
             raise ValueError(f"Account configuration '{account}' not found or invalid")
 
-        # Run the async function to subscribe and stream messages
+        # Get server for host field - use first server from servers list
+        servers = account_config.get("servers", "nats://localhost:4222")
+        server_host = servers.split(",")[0].strip()
+
+        # Run the async function to collect messages
         try:
-            # Get server for host field - use first server from servers list
-            servers = account_config.get("servers", "nats://localhost:4222")
-            server_host = servers.split(",")[0].strip()
+            events = asyncio.run(
+                _collect_messages(subject, account_config, server_host, logger)
+            )
 
-            # Convert entries to Splunk events
-            event_count = 0
-            for event in asyncio.run(
-                _subscribe_to_topic(subject, account_config, server_host, logger)
-            ):
+            # Yield each event
+            for event in events:
                 yield event
-                event_count += 1
-
-            if logger:
-                logger.info("Successfully processed %d events", event_count)
 
         except Exception as e:
             if logger:
@@ -78,9 +78,14 @@ def generate(command_instance):
         raise RuntimeError(str(e))
 
 
-async def _subscribe_to_topic(subject, account_config, server_host, logger=None):
+async def _collect_messages(
+    subject: str,
+    account_config: dict[str, Any],
+    server_host: str,
+    logger: Any | None = None,
+) -> list[dict[str, Any]]:
     """
-    Async function to connect to NATS and subscribe to topic, yielding events as they arrive
+    Async coroutine to connect to NATS and collect messages from topic
 
     Args:
         subject: NATS subject to subscribe to
@@ -88,71 +93,76 @@ async def _subscribe_to_topic(subject, account_config, server_host, logger=None)
         server_host: Server host for event host field
         logger: Optional logger instance
 
-    Yields:
-        Event dictionaries for Splunk
+    Returns:
+        List of event dictionaries for Splunk
     """
     nc = None
-    event_queue = asyncio.Queue()
+    events: list[dict[str, Any]] = []
 
     try:
         # Connection options
-        connect_options = {}
+        connect_options: dict[str, Any] = {}
 
         # Get server URLs (comma-separated)
         servers = account_config.get("servers", "nats://localhost:4222")
-        server_list = [server.strip() for server in servers.split(",")]
+        server_list: list[str] = [server.strip() for server in servers.split(",")]
 
         if account_config.get("username") and account_config.get("password"):
             connect_options["user"] = account_config["username"]
             connect_options["password"] = account_config["password"]
-            if logger:
-                logger.debug("Using authentication credentials")
-
-        # No connection timeout for continuous monitoring
 
         # Connect to NATS
-        if logger:
-            logger.debug("Connecting to NATS servers: %s", server_list)
         nc = await nats.connect(servers=server_list, **connect_options)
-        if logger:
-            logger.debug("Connected to NATS server")
 
-        # Message handler that immediately queues events
-        async def message_handler(msg):
-            if logger:
-                logger.debug("Received message on subject '%s'", msg.subject)
+        # Message handler that collects events
+        async def message_handler(msg: Msg) -> None:
+            try:
+                # Handle the message data - decode to string for _raw
+                if msg.data:
+                    try:
+                        data_str = msg.data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        data_str = base64.b64encode(msg.data).decode("ascii")
+                else:
+                    data_str = ""
 
-            message_data = {
-                "subject": msg.subject,
-                "data": msg.data,
-                "reply": msg.reply,
-                "headers": dict(msg.headers) if msg.headers else None,
-                "received_time": time.time(),
-            }
-            event = _create_event(message_data, server_host)
-            if event:
-                await event_queue.put(event)
+                # Create the Splunk event
+                event: dict[str, Any] = {
+                    "_time": msg.metadata.timestamp.timestamp(),
+                    "_raw": data_str,
+                    "source": msg.subject,
+                    "sourcetype": "nats:topic",
+                    "host": server_host,
+                    "subject": msg.subject,
+                }
+
+                events.append(event)
+            except Exception as e:
+                if logger:
+                    logger.error("Failed to process message: %s", str(e))
 
         # Subscribe to the subject
-        if logger:
-            logger.debug("Subscribing to subject: %s", subject)
         sub = await nc.subscribe(subject, cb=message_handler)
 
-        if logger:
-            logger.debug("Listening for messages continuously")
+        # Wait for messages with timeout
+        timeout_duration = 30  # 30 seconds
+        start_time = time.time()
 
-        # Yield events as they arrive continuously
-        try:
-            while True:
-                event = await event_queue.get()
-                yield event
-        except asyncio.CancelledError:
-            pass
+        while time.time() - start_time < timeout_duration:
+            await asyncio.sleep(0.1)  # Small sleep to allow message processing
+
+            # If we have collected some events, we can break early
+            # This prevents the command from waiting the full timeout if messages are received
+            if len(events) > 0:
+                # Wait a bit more to collect additional messages
+                additional_wait = min(5, timeout_duration - (time.time() - start_time))
+                if additional_wait > 0:
+                    await asyncio.sleep(additional_wait)
+                break
 
         # Unsubscribe
-        await sub.unsubscribe()
-        if logger:
-            logger.debug("Unsubscribed from subject: %s", subject)
+        if sub:
+            await sub.unsubscribe()
 
     except Exception as e:
         if logger:
@@ -162,58 +172,15 @@ async def _subscribe_to_topic(subject, account_config, server_host, logger=None)
         if nc:
             try:
                 await nc.close()
-                if logger:
-                    logger.debug("NATS connection closed")
-            except Exception as e:
-                if logger:
-                    logger.error("Error closing NATS connection: %s", str(e))
+            except Exception:
+                pass
+
+    return events
 
 
-def _create_event(message, server):
-    """Convert a NATS message to a Splunk event"""
-    try:
-        # Handle the message data - decode to string for _raw
-        if message["data"]:
-            try:
-                # Try to decode as UTF-8
-                data_str = message["data"].decode("utf-8")
-            except UnicodeDecodeError:
-                # If it's not valid UTF-8, encode as base64
-                data_str = base64.b64encode(message["data"]).decode("ascii")
-        else:
-            data_str = ""
-
-        # Create the Splunk event
-        event = {
-            "_time": message["received_time"],
-            "_raw": data_str,
-            "source": message["subject"],
-            "sourcetype": "nats:topic",
-            "host": server,
-            "subject": message["subject"],
-            "reply": message["reply"],
-        }
-
-        # Add headers as fields if they exist
-        if message["headers"]:
-            for key, value in message["headers"].items():
-                event[f"header_{key}"] = value
-
-        return event
-
-    except Exception as e:
-        return {
-            "_time": time.time(),
-            "_raw": f"Failed to process message: {str(e)}",
-            "source": message.get("subject", "unknown"),
-            "sourcetype": "nats:subscribe:error",
-            "host": server,
-            "subject": message.get("subject", "unknown"),
-            "error_type": "message_processing_error",
-        }
-
-
-def _get_account_config(command_instance, account_name):
+def _get_account_config(
+    command_instance: Any, account_name: str
+) -> dict[str, Any] | None:
     """
     Retrieve account configuration from Splunk configuration using UCC patterns.
 
@@ -255,6 +222,3 @@ def _get_account_config(command_instance, account_name):
         raise Exception(
             f"Failed to get account configuration '{account_name}': {str(e)}"
         )
-
-
-# UCC handles command dispatch automatically
