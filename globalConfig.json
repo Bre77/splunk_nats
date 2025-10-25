@@ -425,7 +425,7 @@
     "meta": {
         "name": "nats",
         "restRoot": "nats",
-        "version": "0.0.3",
+        "version": "0.1.0",
         "displayName": "NATS",
         "schemaVersion": "0.0.10",
         "supportedThemes": [

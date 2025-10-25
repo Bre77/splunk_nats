@@ -3,6 +3,14 @@ NATS JetStream Key-Value Input Helper Module
 
 This module provides the input helper functions for collecting data from NATS JetStream KV buckets.
 UCC will call validate_input() during configuration validation and stream_events() during data collection.
+
+Checkpointing:
+This module implements checkpointing to prevent reingesting the same data on restart.
+- Checkpoints are stored using Splunk's KVStore via solnlib.modular_input.checkpointer
+- Each input stores its last processed revision number as the checkpoint
+- On startup, the module resumes from the last checkpoint to avoid duplicate events
+- The checkpoint is updated after successfully processing each batch of events
+- Configuration files required: collections.conf and transforms.conf for the checkpointer
 """
 
 import time
@@ -19,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 # Import Splunk libraries
 from splunklib import modularinput as smi
 from solnlib import conf_manager
+from solnlib.modular_input import checkpointer
 import nats
 
 # Set up logger
@@ -97,16 +106,72 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             if not account_config:
                 raise Exception(f"Account configuration '{account}' not found")
 
+            # Set up checkpointing
+            kvstore_checkpointer = None
+            current_checkpoint = None
+            checkpointer_key_name = None
+
+            try:
+                kvstore_checkpointer = checkpointer.KVStoreCheckpointer(
+                    "nats_kv_checkpointer",
+                    session_key,
+                    "nats",
+                )
+
+                # Get checkpoint key for this input
+                checkpointer_key_name = _get_checkpointer_key_name(input_name)
+                current_checkpoint = kvstore_checkpointer.get(checkpointer_key_name)
+
+                if current_checkpoint is not None:
+                    logger.info(
+                        f"Resuming from checkpoint revision {current_checkpoint} for input {input_name}"
+                    )
+                else:
+                    logger.info(
+                        f"No checkpoint found, starting from beginning for input {input_name}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to initialize checkpointer for input {input_name}: {str(e)}. "
+                    "Continuing without checkpointing."
+                )
+                kvstore_checkpointer = None
+                current_checkpoint = None
+
             # Monitor NATS JetStream KV bucket
-            asyncio.run(
+            last_revision = asyncio.run(
                 _monitor_kv_bucket(
                     bucket=bucket,
                     subject=subject,
                     account_config=account_config,
                     sourcetype=sourcetype,
                     event_writer=event_writer,
+                    starting_revision=current_checkpoint,
                 )
             )
+
+            # Update checkpoint with the last processed revision
+            if (
+                last_revision is not None
+                and kvstore_checkpointer is not None
+                and checkpointer_key_name is not None
+            ):
+                try:
+                    kvstore_checkpointer.update(checkpointer_key_name, last_revision)
+                    logger.info(
+                        f"Updated checkpoint to revision {last_revision} for input {input_name}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to update checkpoint for input {input_name}: {str(e)}"
+                    )
+            else:
+                if last_revision is None:
+                    logger.info(f"No new events processed for input {input_name}")
+                else:
+                    logger.warning(
+                        f"Checkpointer not available, cannot save checkpoint for input {input_name}"
+                    )
 
         except Exception as e:
             # Log error instead of writing as event
@@ -119,7 +184,8 @@ async def _monitor_kv_bucket(
     account_config: Dict[str, Any],
     sourcetype: str,
     event_writer: smi.EventWriter,
-) -> None:
+    starting_revision: Optional[int] = None,
+) -> Optional[int]:
     """
     Monitor NATS JetStream KV bucket for changes.
 
@@ -129,6 +195,10 @@ async def _monitor_kv_bucket(
         account_config: Account configuration dictionary
         sourcetype: Sourcetype for events
         event_writer: EventWriter for outputting events
+        starting_revision: Optional revision number to start from
+
+    Returns:
+        Last processed revision number, or None if no events processed
     """
     nc = None
     try:
@@ -156,11 +226,21 @@ async def _monitor_kv_bucket(
             connected_host = nc.connected_url.netloc
 
         # Create a watcher for the subject pattern
+        # Always include history to catch up on missed entries when resuming
         watcher = await kv.watch(subject, include_history=True)
+
+        last_revision = None
 
         # Process watcher events
         async for entry in watcher:
             if entry is None or not entry.value:
+                continue
+
+            # Skip entries we've already processed
+            if starting_revision is not None and entry.revision <= starting_revision:
+                logger.debug(
+                    f"Skipping already processed entry at revision {entry.revision}"
+                )
                 continue
 
             # Determine the raw value to write
@@ -179,11 +259,18 @@ async def _monitor_kv_bucket(
             )
 
             event_writer.write_event(event)
+            last_revision = entry.revision
+            logger.debug(
+                f"Processed entry at revision {entry.revision} for key {entry.key}"
+            )
+
+        return last_revision
 
     except Exception as e:
         logger.error(
             f"Failed to monitor KV bucket '{bucket}' with pattern '{subject}': {str(e)}"
         )
+        return None
 
     finally:
         if nc:
@@ -226,3 +313,18 @@ def _get_account_config(
         raise Exception(
             f"Failed to get account configuration '{account_name}': {str(e)}"
         )
+
+
+def _get_checkpointer_key_name(input_name: str) -> str:
+    """
+    Get checkpointer key name for the given input.
+
+    Args:
+        input_name: Full input name (e.g., "nats_kv://input_name")
+
+    Returns:
+        Checkpointer key name
+    """
+    # Extract the input name from the full input string
+    # Input name format is typically "nats_kv://<input_name>"
+    return input_name.split("//")[-1]
