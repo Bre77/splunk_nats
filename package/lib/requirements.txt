@@ -1,0 +1,4 @@
+splunktaucclib
+splunk-sdk
+solnlib
+nats-py
