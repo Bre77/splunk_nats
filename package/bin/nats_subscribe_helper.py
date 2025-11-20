@@ -1,5 +1,19 @@
 #!/usr/bin/env python
 
+# Copyright 2025 Brett Adams
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 NATS Subscribe Input Helper Module
 
@@ -7,21 +21,22 @@ This module provides the input helper functions for collecting data from NATS to
 UCC will call validate_input() during configuration validation and stream_events() during data collection.
 """
 
-import sys
-import os
 import asyncio
 import base64
 import logging
+import os
+import sys
 import time
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 # Add the lib directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 # Import Splunk libraries
 from nats.aio.msg import Msg
-from splunklib import modularinput as smi
 from solnlib import conf_manager
+from splunklib import modularinput as smi
+
 import nats
 
 # Set up logger

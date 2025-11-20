@@ -1,11 +1,25 @@
 #!/usr/bin/env python
 
-import sys
-import os
+# Copyright 2025 Brett Adams
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
+import os
+import sys
 import time
-from typing import Any
 from collections.abc import Generator
+from typing import Any
 
 # Add the lib directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
@@ -13,9 +27,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 # These imports are not needed for UCC custom search commands
 # UCC generates the command wrapper automatically
 import base64
-import nats
+
 from nats.aio.msg import Msg
 from solnlib import conf_manager
+
+import nats
 
 
 def generate(command_instance: Any) -> Generator[dict[str, Any], None, None]:
@@ -131,7 +147,7 @@ async def _collect_messages(
                     "_time": time.time(),
                     "_raw": data_str,
                     "source": msg.subject,
-                    "sourcetype": "nats:topic",
+                    "sourcetype": "nats:json",
                     "host": server_host,
                     "subject": msg.subject,
                 }

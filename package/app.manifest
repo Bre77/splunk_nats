@@ -25,9 +25,9 @@
         },
         "commonInformationModels": null,
         "license": {
-            "name": "LICENSE.txt",
+            "name": "Apache License 2.0",
             "text": "./LICENSES/LICENSE.txt",
-            "uri": null
+            "uri": "http://www.apache.org/licenses/LICENSE-2.0"
         },
         "privacyPolicy": {
             "name": null,

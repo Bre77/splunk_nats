@@ -1,3 +1,17 @@
+# Copyright 2025 Brett Adams
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 NATS JetStream Key-Value Input Helper Module
 
@@ -13,21 +27,22 @@ This module implements checkpointing to prevent reingesting the same data on res
 - Configuration files required: collections.conf and transforms.conf for the checkpointer
 """
 
-import time
-import sys
-import os
 import asyncio
 import base64
 import logging
-from typing import Dict, Any, Optional
+import os
+import sys
+import time
+from typing import Any, Dict, Optional
 
 # Add the lib directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 # Import Splunk libraries
-from splunklib import modularinput as smi
 from solnlib import conf_manager
 from solnlib.modular_input import checkpointer
+from splunklib import modularinput as smi
+
 import nats
 
 # Set up logger
@@ -94,7 +109,7 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             bucket = input_item.get("bucket")
             subject = input_item.get("subject", "*")
             account = input_item.get("account")
-            sourcetype = input_item.get("sourcetype", "nats:kv")
+            sourcetype = input_item.get("sourcetype", "nats:json")
 
             # Get session key for configuration access
             session_key = inputs.metadata.get("session_key")

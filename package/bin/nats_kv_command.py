@@ -1,9 +1,22 @@
 #!/usr/bin/env python
 
-import sys
-import os
+# Copyright 2025 Brett Adams
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import asyncio
+import os
+import sys
 import time
 
 # Add the lib directory to Python path
@@ -12,9 +25,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 # These imports are not needed for UCC custom search commands
 # UCC generates the command wrapper automatically
 import base64
-import nats
+
 from nats.js.errors import KeyNotFoundError, NoKeysError
 from solnlib import conf_manager
+
+import nats
 
 
 def generate(command_instance):
@@ -31,21 +46,31 @@ def generate(command_instance):
     try:
         # Get command arguments
         bucket = getattr(command_instance, "bucket", None)
-        key = getattr(command_instance, "key", None)
+        key = getattr(command_instance, "key", ">")
         account = getattr(command_instance, "account", None)
+
+        # Get logger if available
+        logger = getattr(command_instance, "logger", None)
+
+        # Convert parameters to strings and validate
+        if bucket is not None:
+            bucket = str(bucket)
+        if key is not None:
+            key = str(key)
+        if account is not None:
+            account = str(account)
+
+        if logger:
+            logger.info(
+                f"NATS KV command parameters - bucket: {bucket}, key: {key}, account: {account}"
+            )
 
         # Validate required parameters
         if not bucket:
             raise ValueError("Bucket parameter is required")
 
-        if not key:
-            raise ValueError("Key parameter is required")
-
         if not account:
             raise ValueError("Account parameter is required")
-
-        # Get logger if available
-        logger = getattr(command_instance, "logger", None)
 
         # Get account configuration
         account_config = _get_account_config(command_instance, account)
@@ -54,9 +79,8 @@ def generate(command_instance):
 
         # Run the async function to get KV history
         try:
-            for event in asyncio.run(
-                _get_kv_history(bucket, key, account_config, logger)
-            ):
+            events = asyncio.run(_get_kv_history(bucket, key, account_config, logger))
+            for event in events:
                 yield event
 
         except Exception as e:
@@ -78,10 +102,11 @@ async def _get_kv_history(bucket, key, account_config, logger=None):
         account_config: Account configuration dictionary
         logger: Optional logger instance
 
-    Yields:
-        Event dictionaries for Splunk
+    Returns:
+        List of event dictionaries for Splunk
     """
     nc = None
+    events = []
     try:
         # Connection options
         connect_options = {}
@@ -117,35 +142,33 @@ async def _get_kv_history(bucket, key, account_config, logger=None):
             for entry in entries:
                 try:
                     # Handle the value - decode to string for _raw
-                    if entry.value:
-                        try:
-                            value_str = entry.value.decode("utf-8")
-                        except UnicodeDecodeError:
-                            value_str = base64.b64encode(entry.value).decode("ascii")
-                    else:
-                        value_str = ""
+                    if not entry.value:
+                        continue
+                    try:
+                        value_str = entry.value.decode("utf-8")
+                    except UnicodeDecodeError:
+                        value_str = base64.b64encode(entry.value).decode("ascii")
 
                     # Create the Splunk event
                     event = {
-                        "_time": entry.created or time.time(),
+                        "_time": entry.created.timestamp()
+                        if entry.created
+                        else time.time(),
                         "_raw": value_str,
-                        "source": f"{entry.bucket}.{entry.key}",
-                        "sourcetype": "nats:kv:history",
+                        "source": entry.key,
+                        "sourcetype": "nats:json",
                         "host": connected_host,
-                        "bucket": entry.bucket,
-                        "key": entry.key,
                         "revision": entry.revision,
-                        "operation": entry.operation or "PUT",
                     }
 
-                    yield event
+                    events.append(event)
 
                 except Exception as e:
                     if logger:
                         logger.error("Failed to process entry: %s", str(e))
 
         except (KeyNotFoundError, NoKeysError):
-            # No entries found - just return without yielding anything
+            # No entries found - just return empty list
             pass
 
     except Exception as e:
@@ -158,6 +181,8 @@ async def _get_kv_history(bucket, key, account_config, logger=None):
                 await nc.close()
             except Exception:
                 pass
+
+    return events
 
 
 def _get_account_config(command_instance, account_name):
@@ -172,6 +197,10 @@ def _get_account_config(command_instance, account_name):
         Dictionary containing account configuration or None if not found
     """
     try:
+        # Ensure account_name is a string
+        if not isinstance(account_name, str):
+            account_name = str(account_name)
+
         # Get session key from command instance
         session_key = getattr(command_instance, "session_key", None)
         if not session_key:
@@ -184,22 +213,32 @@ def _get_account_config(command_instance, account_name):
             raise Exception("Unable to get session key for configuration access")
 
         # Use UCC configuration manager to get account details
-        cfm = conf_manager.ConfManager(
-            session_key,
-            "nats",
-            realm="__REST_CREDENTIAL__#nats#configs/conf-nats_account",
-        )
+        try:
+            cfm = conf_manager.ConfManager(
+                session_key,
+                "nats",
+                realm="__REST_CREDENTIAL__#nats#configs/conf-nats_account",
+            )
 
-        account_conf_file = cfm.get_conf("nats_account")
-        account_config = account_conf_file.get(account_name)
+            account_conf_file = cfm.get_conf("nats_account")
+            account_config = account_conf_file.get(account_name)
+        except Exception as e:
+            raise Exception(
+                f"Failed to access configuration manager for account '{account_name}': {str(e)}"
+            )
 
         if not account_config:
             return None
 
-        # Convert connect_timeout to int if it exists
+        # Convert account_config to dict and handle any special conversions
         config = dict(account_config)
-        if "connect_timeout" in config:
-            config["connect_timeout"] = int(config["connect_timeout"])
+
+        # Convert connect_timeout to int if it exists and is not already an int
+        if "connect_timeout" in config and config["connect_timeout"] is not None:
+            try:
+                config["connect_timeout"] = int(config["connect_timeout"])
+            except (ValueError, TypeError):
+                config["connect_timeout"] = 30  # Default timeout
 
         return config
 

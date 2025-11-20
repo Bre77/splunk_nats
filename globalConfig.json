@@ -1,436 +1,416 @@
 {
-    "pages": {
-        "configuration": {
-            "tabs": [
+  "pages": {
+    "configuration": {
+      "tabs": [
+        {
+          "name": "account",
+          "table": {
+            "actions": ["edit", "delete", "clone"],
+            "header": [
+              {
+                "label": "Name",
+                "field": "name"
+              },
+              {
+                "label": "Servers",
+                "field": "servers"
+              },
+              {
+                "label": "Username",
+                "field": "username"
+              }
+            ]
+          },
+          "entity": [
+            {
+              "type": "text",
+              "label": "Name",
+              "validators": [
                 {
-                    "name": "account",
-                    "table": {
-                        "actions": [
-                            "edit",
-                            "delete",
-                            "clone"
-                        ],
-                        "header": [
-                            {
-                                "label": "Name",
-                                "field": "name"
-                            },
-                            {
-                                "label": "Servers",
-                                "field": "servers"
-                            },
-                            {
-                                "label": "Username",
-                                "field": "username"
-                            }
-                        ]
-                    },
-                    "entity": [
-                        {
-                            "type": "text",
-                            "label": "Name",
-                            "validators": [
-                                {
-                                    "type": "regex",
-                                    "errorMsg": "Account Name must begin with a letter and consist exclusively of alphanumeric characters and underscores.",
-                                    "pattern": "^[a-zA-Z]\\w*$"
-                                },
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Length of input name should be between 1 and 100",
-                                    "minLength": 1,
-                                    "maxLength": 100
-                                }
-                            ],
-                            "field": "name",
-                            "help": "A unique name for the account.",
-                            "required": true
-                        },
-                        {
-                            "type": "text",
-                            "label": "Servers",
-                            "field": "servers",
-                            "help": "Comma-separated list of NATS server URLs (e.g., nats://demo.nats.io:4222,tls://demo.nats.io:4443)",
-                            "required": true,
-                            "defaultValue": "nats://localhost:4222",
-                            "validators": [
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Server URLs should be between 1 and 500 characters",
-                                    "minLength": 1,
-                                    "maxLength": 500
-                                }
-                            ]
-                        },
-                        {
-                            "type": "text",
-                            "label": "Username",
-                            "field": "username",
-                            "help": "Username for NATS authentication",
-                            "required": false,
-                            "validators": [
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Username should be between 1 and 100 characters",
-                                    "minLength": 1,
-                                    "maxLength": 100
-                                }
-                            ]
-                        },
-                        {
-                            "type": "text",
-                            "label": "Password",
-                            "field": "password",
-                            "help": "Password for NATS authentication",
-                            "required": false,
-                            "encrypted": true,
-                            "validators": [
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Password should be between 1 and 200 characters",
-                                    "minLength": 1,
-                                    "maxLength": 200
-                                }
-                            ]
-                        }
-                    ],
-                    "title": "Accounts"
+                  "type": "regex",
+                  "errorMsg": "Account Name must begin with a letter and consist exclusively of alphanumeric characters and underscores.",
+                  "pattern": "^[a-zA-Z]\\w*$"
                 },
                 {
-                    "type": "loggingTab"
+                  "type": "string",
+                  "errorMsg": "Length of input name should be between 1 and 100",
+                  "minLength": 1,
+                  "maxLength": 100
                 }
-            ],
-            "title": "Configuration",
-            "description": "Set up your add-on"
-        },
-        "inputs": {
-            "services": [
+              ],
+              "field": "name",
+              "help": "A unique name for the account.",
+              "required": true
+            },
+            {
+              "type": "text",
+              "label": "Servers",
+              "field": "servers",
+              "help": "Comma-separated list of NATS server URLs (e.g., nats://demo.nats.io:4222,tls://demo.nats.io:4443)",
+              "required": true,
+              "defaultValue": "nats://localhost:4222",
+              "validators": [
                 {
-                    "name": "nats_subscribe",
-                    "entity": [
-                        {
-                            "type": "text",
-                            "label": "Name",
-                            "validators": [
-                                {
-                                    "type": "regex",
-                                    "errorMsg": "Input Name must begin with a letter and consist exclusively of alphanumeric characters and underscores.",
-                                    "pattern": "^[a-zA-Z]\\w*$"
-                                },
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Length of input name should be between 1 and 100",
-                                    "minLength": 1,
-                                    "maxLength": 100
-                                }
-                            ],
-                            "field": "name",
-                            "help": "A unique name for the data input.",
-                            "required": true
-                        },
-                        {
-                            "type": "index",
-                            "field": "index",
-                            "label": "Index"
-                        },
-                        {
-                            "type": "singleSelect",
-                            "label": "Account to use",
-                            "options": {
-                                "referenceName": "account"
-                            },
-                            "help": "Account to use for this input.",
-                            "field": "account",
-                            "required": true,
-                            "validators": [
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Length of account name should be between 1 and 100",
-                                    "minLength": 1,
-                                    "maxLength": 100
-                                }
-                            ]
-                        },
-                        {
-                            "type": "text",
-                            "label": "Subject",
-                            "field": "subject",
-                            "help": "NATS subject to subscribe to (supports wildcards like *.events or foo.>)",
-                            "required": true,
-                            "defaultValue": "*",
-                            "validators": [
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Subject should be between 1 and 255 characters",
-                                    "minLength": 1,
-                                    "maxLength": 255
-                                }
-                            ]
-                        },
-                        {
-                            "type": "text",
-                            "label": "Source Type",
-                            "field": "sourcetype",
-                            "help": "Source type for events collected from NATS",
-                            "required": false,
-                            "defaultValue": "nats:message",
-                            "validators": [
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Source type should be between 1 and 100 characters",
-                                    "minLength": 1,
-                                    "maxLength": 100
-                                }
-                            ]
-                        }
-                    ],
-                    "inputHelperModule": "nats_subscribe_helper",
-                    "title": "NATS Subscribe"
-                },
-                {
-                    "name": "nats_kv",
-                    "entity": [
-                        {
-                            "type": "text",
-                            "label": "Name",
-                            "validators": [
-                                {
-                                    "type": "regex",
-                                    "errorMsg": "Input Name must begin with a letter and consist exclusively of alphanumeric characters and underscores.",
-                                    "pattern": "^[a-zA-Z]\\w*$"
-                                },
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Length of input name should be between 1 and 100",
-                                    "minLength": 1,
-                                    "maxLength": 100
-                                }
-                            ],
-                            "field": "name",
-                            "help": "A unique name for the data input.",
-                            "required": true
-                        },
-                        {
-                            "type": "index",
-                            "field": "index",
-                            "label": "Index"
-                        },
-                        {
-                            "type": "singleSelect",
-                            "label": "Account to use",
-                            "options": {
-                                "referenceName": "account"
-                            },
-                            "help": "Account to use for this input.",
-                            "field": "account",
-                            "required": true,
-                            "validators": [
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Length of account name should be between 1 and 100",
-                                    "minLength": 1,
-                                    "maxLength": 100
-                                }
-                            ]
-                        },
-                        {
-                            "type": "text",
-                            "label": "Bucket",
-                            "field": "bucket",
-                            "help": "NATS JetStream KV bucket name",
-                            "required": true,
-                            "validators": [
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Bucket name should be between 1 and 100 characters",
-                                    "minLength": 1,
-                                    "maxLength": 100
-                                }
-                            ]
-                        },
-                        {
-                            "type": "text",
-                            "label": "Subject",
-                            "field": "subject",
-                            "help": "NATS JetStream KV subject pattern to watch (supports wildcards like *.events or foo.>)",
-                            "required": true,
-                            "defaultValue": "*",
-                            "validators": [
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Subject should be between 1 and 255 characters",
-                                    "minLength": 1,
-                                    "maxLength": 255
-                                }
-                            ]
-                        },
-                        {
-                            "type": "text",
-                            "label": "Source Type",
-                            "field": "sourcetype",
-                            "help": "Source type for events collected from NATS KV",
-                            "required": false,
-                            "defaultValue": "nats:kv",
-                            "validators": [
-                                {
-                                    "type": "string",
-                                    "errorMsg": "Source type should be between 1 and 100 characters",
-                                    "minLength": 1,
-                                    "maxLength": 100
-                                }
-                            ]
-                        }
-                    ],
-                    "inputHelperModule": "nats_kv_helper",
-                    "title": "NATS KV"
+                  "type": "string",
+                  "errorMsg": "Server URLs should be between 1 and 500 characters",
+                  "minLength": 1,
+                  "maxLength": 500
                 }
-            ],
-            "title": "Inputs",
-            "description": "Manage your data inputs",
-            "table": {
-                "actions": [
-                    "edit",
-                    "delete",
-                    "clone"
-                ],
-                "header": [
-                    {
-                        "label": "Name",
-                        "field": "name"
-                    },
-                    {
-                        "label": "Index",
-                        "field": "index"
-                    },
-                    {
-                        "label": "Subject",
-                        "field": "subject"
-                    },
-                    {
-                        "label": "Status",
-                        "field": "disabled"
-                    },
-                    {
-                        "label": "Account",
-                        "field": "account"
-                    },
-                    {
-                        "label": "Bucket",
-                        "field": "bucket"
-                    }
-                ],
-                "moreInfo": [
-                    {
-                        "label": "Name",
-                        "field": "name"
-                    },
-                    {
-                        "label": "Index",
-                        "field": "index"
-                    },
-                    {
-                        "label": "Subject",
-                        "field": "subject"
-                    },
-                    {
-                        "label": "Source Type",
-                        "field": "sourcetype"
-                    },
-                    {
-                        "label": "Status",
-                        "field": "disabled",
-                        "mapping": {
-                            "true": "Inactive",
-                            "false": "Active"
-                        }
-                    },
-                    {
-                        "label": "Account",
-                        "field": "account"
-                    },
-                    {
-                        "label": "Bucket",
-                        "field": "bucket"
-                    }
-                ]
+              ]
+            },
+            {
+              "type": "text",
+              "label": "Username",
+              "field": "username",
+              "help": "Username for NATS authentication",
+              "required": false,
+              "validators": [
+                {
+                  "type": "string",
+                  "errorMsg": "Username should be between 1 and 100 characters",
+                  "minLength": 1,
+                  "maxLength": 100
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "label": "Password",
+              "field": "password",
+              "help": "Password for NATS authentication",
+              "required": false,
+              "encrypted": true,
+              "validators": [
+                {
+                  "type": "string",
+                  "errorMsg": "Password should be between 1 and 200 characters",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              ]
             }
+          ],
+          "title": "Accounts"
         },
-        "dashboard": {
-            "panels": [
-                {
-                    "name": "default"
-                }
-            ]
+        {
+          "type": "loggingTab"
         }
+      ],
+      "title": "Configuration",
+      "description": "Set up your add-on"
     },
-    "customSearchCommand": [
+    "inputs": {
+      "services": [
         {
-            "commandName": "natssubscribe",
-            "fileName": "nats_subscribe_command.py",
-            "commandType": "generating",
-            "requiredSearchAssistant": true,
-            "description": "Subscribe to NATS subject and stream messages in real-time",
-            "syntax": "| natssubscribe subject=<subject> account=<account>",
-            "usage": "public",
-            "arguments": [
+          "name": "nats_subscribe",
+          "entity": [
+            {
+              "type": "text",
+              "label": "Name",
+              "validators": [
                 {
-                    "name": "subject",
-                    "required": true,
-                    "validate": {
-                        "type": "RegularExpression"
-                    }
+                  "type": "regex",
+                  "errorMsg": "Input Name must begin with a letter and consist exclusively of alphanumeric characters and underscores.",
+                  "pattern": "^[a-zA-Z]\\w*$"
                 },
                 {
-                    "name": "account",
-                    "required": true,
-                    "validate": {
-                        "type": "RegularExpression"
-                    }
+                  "type": "string",
+                  "errorMsg": "Length of input name should be between 1 and 100",
+                  "minLength": 1,
+                  "maxLength": 100
                 }
-            ]
+              ],
+              "field": "name",
+              "help": "A unique name for the data input.",
+              "required": true
+            },
+            {
+              "type": "index",
+              "field": "index",
+              "label": "Index"
+            },
+            {
+              "type": "singleSelect",
+              "label": "Account to use",
+              "options": {
+                "referenceName": "account"
+              },
+              "help": "Account to use for this input.",
+              "field": "account",
+              "required": true,
+              "validators": [
+                {
+                  "type": "string",
+                  "errorMsg": "Length of account name should be between 1 and 100",
+                  "minLength": 1,
+                  "maxLength": 100
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "label": "Subject",
+              "field": "subject",
+              "help": "NATS subject to subscribe to (supports wildcards like *.events or foo.>)",
+              "required": true,
+              "defaultValue": "*",
+              "validators": [
+                {
+                  "type": "string",
+                  "errorMsg": "Subject should be between 1 and 255 characters",
+                  "minLength": 1,
+                  "maxLength": 255
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "label": "Source Type",
+              "field": "sourcetype",
+              "help": "Source type for events collected from NATS",
+              "required": false,
+              "defaultValue": "nats:message",
+              "validators": [
+                {
+                  "type": "string",
+                  "errorMsg": "Source type should be between 1 and 100 characters",
+                  "minLength": 1,
+                  "maxLength": 100
+                }
+              ]
+            }
+          ],
+          "inputHelperModule": "nats_subscribe_helper",
+          "title": "NATS Subscribe"
         },
         {
-            "commandName": "natskv",
-            "fileName": "nats_kv_command.py",
-            "commandType": "generating",
-            "requiredSearchAssistant": true,
-            "description": "Retrieve history from NATS JetStream Key-Value store",
-            "syntax": "| natskv bucket=<bucket> key=<key> account=<account>",
-            "usage": "public",
-            "arguments": [
+          "name": "nats_kv",
+          "entity": [
+            {
+              "type": "text",
+              "label": "Name",
+              "validators": [
                 {
-                    "name": "bucket",
-                    "required": true,
-                    "validate": {
-                        "type": "RegularExpression"
-                    }
+                  "type": "regex",
+                  "errorMsg": "Input Name must begin with a letter and consist exclusively of alphanumeric characters and underscores.",
+                  "pattern": "^[a-zA-Z]\\w*$"
                 },
                 {
-                    "name": "key",
-                    "required": true,
-                    "validate": {
-                        "type": "RegularExpression"
-                    }
-                },
-                {
-                    "name": "account",
-                    "required": true,
-                    "validate": {
-                        "type": "RegularExpression"
-                    }
+                  "type": "string",
+                  "errorMsg": "Length of input name should be between 1 and 100",
+                  "minLength": 1,
+                  "maxLength": 100
                 }
-            ]
+              ],
+              "field": "name",
+              "help": "A unique name for the data input.",
+              "required": true
+            },
+            {
+              "type": "index",
+              "field": "index",
+              "label": "Index"
+            },
+            {
+              "type": "singleSelect",
+              "label": "Account to use",
+              "options": {
+                "referenceName": "account"
+              },
+              "help": "Account to use for this input.",
+              "field": "account",
+              "required": true,
+              "validators": [
+                {
+                  "type": "string",
+                  "errorMsg": "Length of account name should be between 1 and 100",
+                  "minLength": 1,
+                  "maxLength": 100
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "label": "Bucket",
+              "field": "bucket",
+              "help": "NATS JetStream KV bucket name",
+              "required": true,
+              "validators": [
+                {
+                  "type": "string",
+                  "errorMsg": "Bucket name should be between 1 and 100 characters",
+                  "minLength": 1,
+                  "maxLength": 100
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "label": "Subject",
+              "field": "subject",
+              "help": "NATS JetStream KV subject pattern to watch (supports wildcards like *.events or foo.>)",
+              "required": true,
+              "defaultValue": "*",
+              "validators": [
+                {
+                  "type": "string",
+                  "errorMsg": "Subject should be between 1 and 255 characters",
+                  "minLength": 1,
+                  "maxLength": 255
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "label": "Source Type",
+              "field": "sourcetype",
+              "help": "Source type for events collected from NATS KV",
+              "required": false,
+              "defaultValue": "nats:kv",
+              "validators": [
+                {
+                  "type": "string",
+                  "errorMsg": "Source type should be between 1 and 100 characters",
+                  "minLength": 1,
+                  "maxLength": 100
+                }
+              ]
+            }
+          ],
+          "inputHelperModule": "nats_kv_helper",
+          "title": "NATS KV"
         }
-    ],
-    "meta": {
-        "name": "nats",
-        "restRoot": "nats",
-        "version": "0.1.0",
-        "displayName": "NATS",
-        "schemaVersion": "0.0.10",
-        "supportedThemes": [
-            "light",
-            "dark"
+      ],
+      "title": "Inputs",
+      "description": "Manage your data inputs",
+      "table": {
+        "actions": ["edit", "delete", "clone"],
+        "header": [
+          {
+            "label": "Name",
+            "field": "name"
+          },
+          {
+            "label": "Index",
+            "field": "index"
+          },
+          {
+            "label": "Subject",
+            "field": "subject"
+          },
+          {
+            "label": "Status",
+            "field": "disabled"
+          },
+          {
+            "label": "Account",
+            "field": "account"
+          },
+          {
+            "label": "Bucket",
+            "field": "bucket"
+          }
+        ],
+        "moreInfo": [
+          {
+            "label": "Name",
+            "field": "name"
+          },
+          {
+            "label": "Index",
+            "field": "index"
+          },
+          {
+            "label": "Subject",
+            "field": "subject"
+          },
+          {
+            "label": "Source Type",
+            "field": "sourcetype"
+          },
+          {
+            "label": "Status",
+            "field": "disabled",
+            "mapping": {
+              "true": "Inactive",
+              "false": "Active"
+            }
+          },
+          {
+            "label": "Account",
+            "field": "account"
+          },
+          {
+            "label": "Bucket",
+            "field": "bucket"
+          }
         ]
+      }
+    },
+    "dashboard": {
+      "panels": [
+        {
+          "name": "default"
+        }
+      ]
     }
+  },
+  "customSearchCommand": [
+    {
+      "commandName": "natssubscribe",
+      "fileName": "nats_subscribe_command.py",
+      "commandType": "generating",
+      "requiredSearchAssistant": true,
+      "description": "Subscribe to NATS subject and stream messages in real-time",
+      "syntax": "| natssubscribe subject=<subject> account=<account>",
+      "usage": "public",
+      "arguments": [
+        {
+          "name": "subject",
+          "required": true
+        },
+        {
+          "name": "account",
+          "required": true
+        }
+      ]
+    },
+    {
+      "commandName": "natskv",
+      "fileName": "nats_kv_command.py",
+      "commandType": "generating",
+      "requiredSearchAssistant": true,
+      "description": "Retrieve history from NATS JetStream Key-Value store",
+      "syntax": "| natskv bucket=<bucket> key=<key> account=<account>",
+      "usage": "public",
+      "arguments": [
+        {
+          "name": "account",
+          "required": true
+        },
+        {
+          "name": "bucket",
+          "required": true
+        },
+        {
+          "name": "key",
+          "defaultValue": ">",
+          "required": false
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "name": "nats",
+    "restRoot": "nats",
+    "version": "0.0.7",
+    "displayName": "NATS",
+    "schemaVersion": "0.0.10",
+    "supportedThemes": ["light", "dark"]
+  },
+  "license": {
+    "name": "Apache License 2.0",
+    "text": "./LICENSES/LICENSE.txt",
+    "uri": "http://www.apache.org/licenses/LICENSE-2.0"
+  }
 }
