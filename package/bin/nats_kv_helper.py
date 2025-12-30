@@ -64,6 +64,7 @@ def validate_input(definition: smi.ValidationDefinition) -> None:
         bucket = definition.parameters.get("bucket")
         subject = definition.parameters.get("subject")
         account = definition.parameters.get("account")
+        domain = definition.parameters.get("domain")
 
         # Validate required fields
         if not bucket:
@@ -110,6 +111,7 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             subject = input_item.get("subject", "*")
             account = input_item.get("account")
             sourcetype = input_item.get("sourcetype", "nats:json")
+            domain = input_item.get("domain")
 
             # Get session key for configuration access
             session_key = inputs.metadata.get("session_key")
@@ -162,6 +164,7 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
                     sourcetype=sourcetype,
                     event_writer=event_writer,
                     starting_revision=current_checkpoint,
+                    domain=domain,
                 )
             )
 
@@ -200,6 +203,7 @@ async def _monitor_kv_bucket(
     sourcetype: str,
     event_writer: smi.EventWriter,
     starting_revision: Optional[int] = None,
+    domain: Optional[str] = None,
 ) -> Optional[int]:
     """
     Monitor NATS JetStream KV bucket for changes.
@@ -211,6 +215,7 @@ async def _monitor_kv_bucket(
         sourcetype: Sourcetype for events
         event_writer: EventWriter for outputting events
         starting_revision: Optional revision number to start from
+        domain: Optional JetStream domain
 
     Returns:
         Last processed revision number, or None if no events processed
@@ -232,7 +237,7 @@ async def _monitor_kv_bucket(
         nc = await nats.connect(servers=server_list, **connect_options)
 
         # Get JetStream context and KV bucket
-        js = nc.jetstream()
+        js = nc.jetstream(domain=domain)
         kv = await js.key_value(bucket)
 
         # Get the connected server URL for the host field

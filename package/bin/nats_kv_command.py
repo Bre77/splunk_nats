@@ -48,6 +48,7 @@ def generate(command_instance):
         bucket = getattr(command_instance, "bucket", None)
         key = getattr(command_instance, "key", ">")
         account = getattr(command_instance, "account", None)
+        domain = getattr(command_instance, "domain", None)
 
         # Get logger if available
         logger = getattr(command_instance, "logger", None)
@@ -59,10 +60,12 @@ def generate(command_instance):
             key = str(key)
         if account is not None:
             account = str(account)
+        if domain is not None:
+            domain = str(domain)
 
         if logger:
             logger.info(
-                f"NATS KV command parameters - bucket: {bucket}, key: {key}, account: {account}"
+                f"NATS KV command parameters - bucket: {bucket}, key: {key}, account: {account}, domain: {domain}"
             )
 
         # Validate required parameters
@@ -79,7 +82,7 @@ def generate(command_instance):
 
         # Run the async function to get KV history
         try:
-            events = asyncio.run(_get_kv_history(bucket, key, account_config, logger))
+            events = asyncio.run(_get_kv_history(bucket, key, account_config, logger, domain))
             for event in events:
                 yield event
 
@@ -92,7 +95,7 @@ def generate(command_instance):
         raise RuntimeError(str(e))
 
 
-async def _get_kv_history(bucket, key, account_config, logger=None):
+async def _get_kv_history(bucket, key, account_config, logger=None, domain=None):
     """
     Async function to connect to NATS and retrieve KV history
 
@@ -101,6 +104,7 @@ async def _get_kv_history(bucket, key, account_config, logger=None):
         key: Key to get history for
         account_config: Account configuration dictionary
         logger: Optional logger instance
+        domain: Optional JetStream domain
 
     Returns:
         List of event dictionaries for Splunk
@@ -131,7 +135,7 @@ async def _get_kv_history(bucket, key, account_config, logger=None):
             connected_host = nc.connected_url.netloc
 
         # Get JetStream context and KV bucket
-        js = nc.jetstream()
+        js = nc.jetstream(domain=domain)
         kv = await js.key_value(bucket)
 
         # Get the history for the key
