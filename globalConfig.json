@@ -268,8 +268,8 @@
                             "label": "Subject",
                             "field": "subject",
                             "help": "NATS JetStream KV subject pattern to watch (supports wildcards like *.events or foo.>)",
-                            "required": true,
-                            "defaultValue": "*",
+                            "required": false,
+                            "defaultValue": ">",
                             "validators": [
                                 {
                                     "type": "string",
@@ -404,7 +404,7 @@
             "commandType": "generating",
             "requiredSearchAssistant": true,
             "description": "Retrieve history from NATS JetStream Key-Value store",
-            "syntax": "| natskv bucket=<bucket> key=<key> account=<account>",
+            "syntax": "| natskv account=<account> bucket=<bucket> key=<key> [domain=<domain>]",
             "usage": "public",
             "arguments": [
                 {
@@ -430,7 +430,7 @@
     "meta": {
         "name": "nats",
         "restRoot": "nats",
-        "version": "1.0.1",
+        "version": "1.0.2",
         "displayName": "NATS",
         "schemaVersion": "0.0.10",
         "supportedThemes": [
