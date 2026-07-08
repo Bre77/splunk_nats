@@ -431,11 +431,15 @@
         "name": "nats",
         "restRoot": "nats",
         "version": "1.0.2",
-        "displayName": "NATS",
+        "displayName": "NATS Add-on",
         "schemaVersion": "0.0.10",
         "supportedThemes": [
             "light",
             "dark"
+        ],
+        "supportedPythonVersion": [
+            "3.9",
+            "3.13"
         ]
     }
 }

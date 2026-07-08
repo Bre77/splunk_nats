@@ -1,4 +1,4 @@
 splunktaucclib
-splunk-sdk
+splunk-sdk>=2.1.1,<3
 solnlib
 nats-py

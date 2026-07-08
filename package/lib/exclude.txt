@@ -1,3 +1,15 @@
 # Exclude the following packages from being installed in the add-on
 # You can add here packages that are shipped with Splunk by default
 # Please add one dependency name per line, similarly to requirements.txt
+
+# solnlib's optional OpenTelemetry chain ships x86_64-only native binaries that fail
+# Splunk Cloud AArch64 vetting; the add-on never imports solnlib.observability.
+grpcio
+protobuf
+googleapis-common-protos
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-proto
+opentelemetry-semantic-conventions
+opentelemetry-exporter-otlp-proto-common
+opentelemetry-exporter-otlp-proto-grpc

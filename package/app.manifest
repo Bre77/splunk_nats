@@ -1,11 +1,11 @@
 {
     "schemaVersion": "2.0.0",
     "info": {
-        "title": "NATS",
+        "title": "NATS Add-on",
         "id": {
             "group": null,
             "name": "nats",
-            "version": "0.0.1"
+            "version": "1.0.2"
         },
         "author": [
             {
@@ -15,7 +15,7 @@
             }
         ],
         "releaseDate": null,
-        "description": "NATS",
+        "description": "Stream messages and JetStream Key-Value data from NATS into Splunk via modular inputs, and query NATS subjects and KV history on demand with the natssubscribe and natskv custom search commands.",
         "classification": {
             "intendedAudience": "IT Professionals",
             "categories": [
