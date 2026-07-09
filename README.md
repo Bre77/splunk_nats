@@ -48,6 +48,29 @@ The add-on is built with the [Splunk Add-on UCC Framework](https://splunk.github
 This runs `ucc-gen build` followed by `ucc-gen package`, producing an installable
 package under `output/`.
 
+## Continuous integration & publishing
+
+CI is **credential-free** and validation-only; publishing is a **separate, manual**
+step so Splunkbase credentials never live in GitHub secrets.
+
+- **CI - `Validate`** (`.github/workflows/validate.yml`) runs on every PR and push
+  to `main`: `ucc-gen` build + package + **local AppInspect** (no credentials, no
+  publish). It calls the reusable workflow
+  `.github/workflows/_reusable-build-appinspect.yml`, which other add-ons can reuse
+  via `uses:` (see the header comment in that file).
+- **Publish - `bin/publish-splunkbase.sh`** is run by a human on demand, never by CI.
+  It pulls Splunkbase credentials from 1Password at runtime (`op item get`), builds
+  the package, and uploads a new release to Splunkbase. It refuses until the add-on
+  has a Splunkbase app id:
+
+  ```
+  bin/publish-splunkbase.sh --app-id <id> [--version x.y.z] [--public] [--dry-run]
+  ```
+
+A brand-new add-on has no Splunkbase app id yet: create the initial listing once via
+the Splunkbase web UI, then pass `--app-id` (or export `SPLUNKBASE_APP_ID`) so
+subsequent releases upload via the API.
+
 ## License
 
 Apache License 2.0. See [LICENSES/LICENSE.txt](package/LICENSES/LICENSE.txt).
