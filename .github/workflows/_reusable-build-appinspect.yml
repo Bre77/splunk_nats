@@ -1,0 +1,63 @@
+# Reusable, credential-free build + local AppInspect for ucc-gen add-ons.
+#
+# Builds the add-on with ucc-gen, packages the installable tarball, runs AppInspect
+# LOCALLY (no Splunkbase credentials), and uploads the package as a build artifact.
+# There is deliberately NO publish/upload step and NO secrets here: publishing to
+# Splunkbase is a separate, human-triggered local step (bin/publish-splunkbase.sh).
+#
+# Fleet reuse: any Splunk add-on repo can call this instead of copying it, e.g.
+#
+#   jobs:
+#     validate:
+#       uses: Bre77/splunk_nats/.github/workflows/_reusable-build-appinspect.yml@main
+#       with:
+#         app_dir: "."
+name: Reusable build and AppInspect
+
+on:
+  workflow_call:
+    inputs:
+      app_dir:
+        description: "Path to the add-on source (contains globalConfig.json + package/)."
+        type: string
+        default: "."
+      use_ucc_gen:
+        description: "Build with ucc-gen (true for UCC add-ons like splunk_nats)."
+        type: boolean
+        default: true
+      splunk_python_version:
+        description: "Splunk Python runtime to build lib/ against."
+        type: string
+        default: "3.9"
+      fail_on:
+        description: "AppInspect gate: errors | warnings | none."
+        type: string
+        default: "errors"
+
+jobs:
+  build-appinspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Build (ucc-gen + package) and run AppInspect LOCALLY. local_app_inspect is the
+      # credential-free path; the step fails when AppInspect finds issues at or above
+      # `fail_on`, giving every push/PR an automatic publish-readiness gate.
+      - name: Build and AppInspect (local, credential-free)
+        id: build
+        uses: VatsalJagani/splunk-app-action@v6
+        with:
+          app_dir: ${{ inputs.app_dir }}
+          use_ucc_gen: ${{ inputs.use_ucc_gen }}
+          splunk_python_version: ${{ inputs.splunk_python_version }}
+          is_app_inspect_check: true
+          local_app_inspect: true
+          fail_on: ${{ inputs.fail_on }}
+
+      - name: Upload built package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.artifact_name }}
+          path: ${{ steps.build.outputs.build_path }}
+          if-no-files-found: error

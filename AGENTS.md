@@ -8,6 +8,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `package/lib/requirements.txt` caps `splunk-sdk>=2.1.1,<3` (maintained standard) and `globalConfig.json` `meta.supportedPythonVersion` declares `["3.9","3.13"]`.
 - `package/lib/exclude.txt` drops `solnlib`'s optional OpenTelemetry chain (grpcio/protobuf/opentelemetry-*). Those ship x86_64-only native `.so` files that fail Splunk Cloud AArch64 vetting; the add-on never imports `solnlib.observability`, so excluding them is safe and keeps the package platform-independent.
 - Splunkbase readiness: `splunk-appinspect inspect nats-<version>.tar.gz --mode precert` passes with 0 failures; remaining warnings are vendored-library / framework-level (TLS validation in solnlib/splunktaucclib REST, SplunkJS telemetry notices).
+- CI/publish split: `.github/workflows/validate.yml` (via reusable `_reusable-build-appinspect.yml`, using `VatsalJagani/splunk-app-action`) runs credential-free build + local AppInspect on every push/PR - no Splunkbase secrets in GitHub. Publishing is manual: `bin/publish-splunkbase.sh` pulls creds from 1Password (`op item get Splunkbase --vault CLI`) at runtime and POSTs to Splunkbase `app/<id>/new_release/`. It refuses until an app id exists (nats has no Splunkbase listing yet; the initial listing must be created in the web UI first).
 
 ## Maintaining this file
 
