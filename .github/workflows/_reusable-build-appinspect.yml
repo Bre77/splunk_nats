@@ -1,32 +1,69 @@
-# Reusable, credential-free build + local AppInspect for ucc-gen add-ons.
+# Reusable, credential-free build + local AppInspect for Splunk add-ons.
 #
-# Builds the add-on with ucc-gen, packages the installable tarball, runs AppInspect
-# LOCALLY (no Splunkbase credentials), and uploads the package as a build artifact.
+# Builds the add-on, packages the installable tarball, runs AppInspect LOCALLY
+# (no Splunkbase credentials), and uploads the package as a build artifact.
 # There is deliberately NO publish/upload step and NO secrets here: publishing to
 # Splunkbase is a separate, human-triggered local step (bin/publish-splunkbase.sh).
 #
-# Fleet reuse: any Splunk add-on repo can call this instead of copying it, e.g.
+# Three packaging modes, selected by the caller's inputs:
 #
-#   jobs:
-#     validate:
-#       uses: Bre77/splunk_nats/.github/workflows/_reusable-build-appinspect.yml@main
-#       with:
-#         app_dir: "."
+#   1. ucc-gen add-on   -> use_ucc_gen: true    (build_command unset)
+#      splunk-app-action runs ucc-gen + package + local AppInspect. Used by
+#      splunk_nats itself. Honors fail_on.
+#
+#   2. plain add-on with its own build script -> build_command set
+#      The add-on's own authoritative build script (e.g. "./.build.sh") is the
+#      definition of the shippable artifact: it vendors lib/, strips dev/tooling
+#      files, and emits a clean .spl. We run that script and AppInspect the .spl
+#      it produces - NOT a naive tar of the repo root (which would sweep in
+#      .github/, .claude/, README, etc. and fail AppInspect). Honors fail_on.
+#
+#   3. plain add-on, no build script -> neither use_ucc_gen nor build_command
+#      Backward-compatible fallback: splunk-app-action tars app_dir as-is.
+#
+# Fleet reuse examples:
+#
+#   # ucc add-on
+#   uses: Bre77/splunk_nats/.github/workflows/_reusable-build-appinspect.yml@main
+#   with: { app_dir: ".", use_ucc_gen: true }
+#
+#   # plain add-on built via its own script (.build.sh writes ../<app>.spl)
+#   uses: Bre77/splunk_nats/.github/workflows/_reusable-build-appinspect.yml@main
+#   with:
+#     use_ucc_gen: false
+#     build_command: "./.build.sh"
+#     package_glob: "../*.spl"
 name: Reusable build and AppInspect
 
 on:
   workflow_call:
     inputs:
       app_dir:
-        description: "Path to the add-on source (contains globalConfig.json + package/)."
+        description: "Path to the add-on source (contains globalConfig.json + package/ for ucc, or the build script for plain add-ons)."
         type: string
         default: "."
       use_ucc_gen:
         description: "Build with ucc-gen (true for UCC add-ons like splunk_nats)."
         type: boolean
         default: true
+      build_command:
+        description: >-
+          Plain (non-ucc) add-ons only: shell command run in app_dir that produces
+          a clean installable package (e.g. "./.build.sh"). When set, this replaces
+          the tar-as-is fallback and AppInspect scans the produced package. The
+          command relies on the splunk_python_version interpreter being on PATH.
+          Leave empty for ucc add-ons or the tar-as-is fallback.
+        type: string
+        default: ""
+      package_glob:
+        description: >-
+          Required when build_command is set: glob (evaluated relative to app_dir)
+          matching the single package file the build produced, e.g. "../*.spl" for
+          scripts that write ../<app>.spl. Must resolve to exactly one file.
+        type: string
+        default: ""
       splunk_python_version:
-        description: "Splunk Python runtime to build lib/ against."
+        description: "Splunk Python runtime to build lib/ against (also the interpreter on PATH for build_command)."
         type: string
         default: "3.9"
       fail_on:
@@ -41,11 +78,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Build (ucc-gen + package) and run AppInspect LOCALLY. local_app_inspect is the
-      # credential-free path; the step fails when AppInspect finds issues at or above
-      # `fail_on`, giving every push/PR an automatic publish-readiness gate.
+      # --- Modes 1 & 3: ucc-gen build, or tar-as-is fallback (build_command unset) ---
+      # Build (ucc-gen or plain tar) and run AppInspect LOCALLY. local_app_inspect is
+      # the credential-free path; the step fails when AppInspect finds issues at or
+      # above `fail_on`, giving every push/PR an automatic publish-readiness gate.
       - name: Build and AppInspect (local, credential-free)
         id: build
+        if: inputs.build_command == ''
         uses: VatsalJagani/splunk-app-action@v6
         with:
           app_dir: ${{ inputs.app_dir }}
@@ -56,8 +95,103 @@ jobs:
           fail_on: ${{ inputs.fail_on }}
 
       - name: Upload built package artifact
+        if: inputs.build_command == ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.build.outputs.artifact_name }}
           path: ${{ steps.build.outputs.build_path }}
+          if-no-files-found: error
+
+      # --- Mode 2: caller-provided build command ---
+      - name: Set up Python for build command
+        if: inputs.build_command != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.splunk_python_version }}
+
+      - name: Run caller build command
+        if: inputs.build_command != ''
+        working-directory: ${{ inputs.app_dir }}
+        shell: bash
+        env:
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: |
+          set -euo pipefail
+          eval "$BUILD_COMMAND"
+
+      - name: Resolve built package
+        id: resolve_pkg
+        if: inputs.build_command != ''
+        working-directory: ${{ inputs.app_dir }}
+        shell: bash
+        env:
+          PACKAGE_GLOB: ${{ inputs.package_glob }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PACKAGE_GLOB" ]; then
+            echo "package_glob is required when build_command is set." >&2
+            exit 1
+          fi
+          shopt -s nullglob
+          # Unquoted on purpose: PACKAGE_GLOB must glob-expand to the built package.
+          # shellcheck disable=SC2206
+          matches=( $PACKAGE_GLOB )
+          if [ ${#matches[@]} -eq 0 ]; then
+            echo "No package matched glob '$PACKAGE_GLOB' relative to '${{ inputs.app_dir }}'." >&2
+            exit 1
+          fi
+          if [ ${#matches[@]} -gt 1 ]; then
+            echo "Glob '$PACKAGE_GLOB' matched multiple files: ${matches[*]}" >&2
+            exit 1
+          fi
+          pkg="$(realpath "${matches[0]}")"
+          echo "Built package: $pkg"
+          echo "package_path=$pkg" >> "$GITHUB_OUTPUT"
+          echo "package_name=$(basename "$pkg")" >> "$GITHUB_OUTPUT"
+
+      # AppInspect the clean built package (same artifact that gets uploaded), gated
+      # on fail_on. precert is the Splunkbase pre-certification mode; it runs locally
+      # and needs no credentials.
+      - name: AppInspect built package (local, credential-free)
+        if: inputs.build_command != ''
+        shell: bash
+        env:
+          PKG: ${{ steps.resolve_pkg.outputs.package_path }}
+          FAIL_ON: ${{ inputs.fail_on }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade splunk-appinspect
+          report="$RUNNER_TEMP/appinspect_result.json"
+          splunk-appinspect inspect "$PKG" --mode precert --data-format json --output-file "$report" || true
+          if [ ! -f "$report" ]; then
+            echo "AppInspect produced no report for $PKG." >&2
+            exit 1
+          fi
+          python - "$report" "$FAIL_ON" <<'PY'
+          import json, sys
+          report_path, fail_on = sys.argv[1], sys.argv[2]
+          with open(report_path) as f:
+              summary = json.load(f).get("summary", {})
+          failures = summary.get("failure", 0)
+          errors = summary.get("error", 0)
+          warnings = summary.get("warning", 0)
+          print(f"AppInspect summary: failures={failures} errors={errors} warnings={warnings}")
+          if fail_on == "none":
+              gate = 0
+          elif fail_on == "warnings":
+              gate = failures + errors + warnings
+          else:  # "errors" (default)
+              gate = failures + errors
+          if gate > 0:
+              print(f"AppInspect gate '{fail_on}' failed.")
+              sys.exit(1)
+          print(f"AppInspect gate '{fail_on}' passed.")
+          PY
+
+      - name: Upload built package artifact (build command)
+        if: inputs.build_command != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.resolve_pkg.outputs.package_name }}
+          path: ${{ steps.resolve_pkg.outputs.package_path }}
           if-no-files-found: error
