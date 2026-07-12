@@ -17,6 +17,11 @@
 #      files, and emits a clean .spl. We run that script and AppInspect the .spl
 #      it produces - NOT a naive tar of the repo root (which would sweep in
 #      .github/, .claude/, README, etc. and fail AppInspect). Honors fail_on.
+#      Set node_version alongside build_command for SplunkUI/React add-ons (hibp,
+#      badrcm) whose build script runs pnpm/webpack: it provisions Node + corepack
+#      (pnpm pinned via each app's package.json "packageManager") before the build.
+#      Python is always provisioned in this mode, so hibp's build script (pnpm plus
+#      a pip install into lib/) works with both interpreters present.
 #
 #   3. plain add-on, no build script -> neither use_ucc_gen nor build_command
 #      Backward-compatible fallback: splunk-app-action tars app_dir as-is.
@@ -60,6 +65,16 @@ on:
           Required when build_command is set: glob (evaluated relative to app_dir)
           matching the single package file the build produced, e.g. "../*.spl" for
           scripts that write ../<app>.spl. Must resolve to exactly one file.
+        type: string
+        default: ""
+      node_version:
+        description: >-
+          build_command mode only: when non-empty, provisions Node at this version
+          plus corepack (so the build script's pnpm/webpack run) before build_command.
+          pnpm is not pinned here - corepack uses each app's package.json
+          "packageManager" field. Needs Node >= 18 for pnpm 9 (SUI apps: use "20").
+          Leave empty (default) for plain-Python TAs and the ucc/tar paths - no Node
+          is set up and behavior is unchanged.
         type: string
         default: ""
       splunk_python_version:
@@ -108,6 +123,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.splunk_python_version }}
+
+      # SUI/React add-ons only: build_command shells out to pnpm/webpack. corepack
+      # activates the pnpm version pinned in the app's package.json "packageManager".
+      - name: Set up Node for build command
+        if: inputs.build_command != '' && inputs.node_version != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Enable corepack (pnpm)
+        if: inputs.build_command != '' && inputs.node_version != ''
+        shell: bash
+        run: corepack enable
 
       - name: Run caller build command
         if: inputs.build_command != ''
