@@ -67,6 +67,17 @@ Binary (non UTF-8) payloads are stored base64-encoded.
 This runs `ucc-gen build` followed by `ucc-gen package`, producing an installable
 package under `output/`.
 
+## Testing
+
+- `tests/unit` (pytest) runs the add-on code from `package/bin` against the
+  dependencies in `tests/requirements.txt`.
+- `tests/package` (stdlib unittest) imports every module of the built add-on in
+  `output/nats` with its vendored `lib/`, so build first and run it on each
+  supported runtime: `python3.9 -m unittest discover -s tests/package` (and 3.13).
+- `tests/e2e/search_commands_python.sh <package.tar.gz> <python-version> [image]`
+  pins the search commands to that Splunk Python in a disposable container,
+  imports every `bin/` module there and runs `natssubscribe` and `natskv`.
+
 ## Continuous integration & publishing
 
 CI is **credential-free** and validation-only; publishing is a **separate, manual**

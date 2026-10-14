@@ -33,3 +33,37 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -r tests/requirements.txt
       - run: python -m pytest -q tests/unit
+
+  # Splunk runs the shipped add-on on Python 3.9 or 3.13, and the vendored lib/
+  # is resolved by whichever interpreter ran the build. Build with each, then
+  # import every built bin/ module with its vendored lib/ on both runtimes.
+  python-compat:
+    name: python-compat (build ${{ matrix.build_python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_python: ["3.9", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Both runtimes are installed; the build interpreter is listed last so it
+      # is the python3 on PATH that ucc-gen uses to vendor lib/.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: |
+            ${{ matrix.build_python == '3.9' && '3.13' || '3.9' }}
+            ${{ matrix.build_python }}
+
+      - name: Build add-on
+        run: |
+          python3 -m pip install splunk-add-on-ucc-framework
+          ./build.sh 0.0.0
+
+      - name: Package tests (Python 3.9)
+        run: python3.9 -m unittest discover -s tests/package -v
+
+      - name: Package tests (Python 3.13)
+        run: python3.13 -m unittest discover -s tests/package -v
