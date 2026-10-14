@@ -93,7 +93,7 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             # Get input configuration
             subject = input_item.get("subject")
             account = input_item.get("account")
-            sourcetype = input_item.get("sourcetype", "nats:message")
+            sourcetype = input_item.get("sourcetype") or "nats:message"
 
             # Get session key for configuration access
             session_key = inputs.metadata.get("session_key")

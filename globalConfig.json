@@ -94,7 +94,8 @@
                             ]
                         }
                     ],
-                    "title": "Accounts"
+                    "title": "Accounts",
+                    "formTitle": "Account"
                 },
                 {
                     "type": "loggingTab"
@@ -131,7 +132,8 @@
                         {
                             "type": "index",
                             "field": "index",
-                            "label": "Index"
+                            "label": "Index",
+                            "defaultValue": "main"
                         },
                         {
                             "type": "singleSelect",
@@ -155,9 +157,8 @@
                             "type": "text",
                             "label": "Subject",
                             "field": "subject",
-                            "help": "NATS subject to subscribe to (supports wildcards like *.events or foo.>)",
+                            "help": "NATS subject to subscribe to. Wildcards: * matches exactly one token (telemetry.* matches telemetry.a but not telemetry.a.data), > matches all remaining tokens (telemetry.> matches both).",
                             "required": true,
-                            "defaultValue": "*",
                             "validators": [
                                 {
                                     "type": "string",
@@ -213,7 +214,8 @@
                         {
                             "type": "index",
                             "field": "index",
-                            "label": "Index"
+                            "label": "Index",
+                            "defaultValue": "main"
                         },
                         {
                             "type": "singleSelect",
@@ -314,6 +316,10 @@
                         "field": "name"
                     },
                     {
+                        "label": "Input Type",
+                        "field": "serviceTitle"
+                    },
+                    {
                         "label": "Index",
                         "field": "index"
                     },
@@ -384,8 +390,8 @@
             "fileName": "nats_subscribe_command.py",
             "commandType": "generating",
             "requiredSearchAssistant": true,
-            "description": "Subscribe to NATS subject and stream messages in real-time",
-            "syntax": "| natssubscribe subject=<subject> account=<account>",
+            "description": "Subscribe to a NATS subject and return the messages received, stopping after count messages (default 100, 0 for no limit) or duration seconds (default 10), whichever comes first",
+            "syntax": "| natssubscribe subject=<subject> account=<account> [count=<int>] [duration=<int>]",
             "usage": "public",
             "arguments": [
                 {
@@ -395,6 +401,23 @@
                 {
                     "name": "account",
                     "required": true
+                },
+                {
+                    "name": "count",
+                    "required": false,
+                    "validate": {
+                        "type": "Integer",
+                        "minimum": 0
+                    }
+                },
+                {
+                    "name": "duration",
+                    "required": false,
+                    "validate": {
+                        "type": "Integer",
+                        "minimum": 1,
+                        "maximum": 3600
+                    }
                 }
             ]
         },

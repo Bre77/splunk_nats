@@ -8,8 +8,10 @@ The add-on is built with the [Splunk Add-on UCC Framework](https://splunk.github
 
 ### Modular inputs
 
-- **NATS Subscribe** (`nats_subscribe`) - subscribes to a NATS subject (wildcards
-  such as `*.events` or `foo.>` are supported) and indexes each received message.
+- **NATS Subscribe** (`nats_subscribe`) - subscribes to a NATS subject and indexes
+  each received message. Subjects are dot-separated tokens: `*` matches exactly
+  one token and `>` matches all remaining tokens, so `telemetry.*` matches
+  `telemetry.a` but not `telemetry.a.data`, while `telemetry.>` matches both.
 - **NATS KV** (`nats_kv`) - watches a NATS JetStream Key-Value bucket and indexes
   entries as they change. Progress is checkpointed to the Splunk KV Store (via
   `collections.conf` / `transforms.conf`) so a restart resumes from the last
@@ -17,11 +19,28 @@ The add-on is built with the [Splunk Add-on UCC Framework](https://splunk.github
 
 ### Custom search commands
 
-- `| natssubscribe subject=<subject> account=<account>` - connects to NATS,
-  collects messages published to `subject` for a short window, and returns them
-  as events.
+- `| natssubscribe subject=<subject> account=<account> [count=<int>] [duration=<int>]` -
+  connects to NATS and returns the messages published to `subject` until `count`
+  messages arrived (default 100, `0` for no limit) or `duration` seconds passed
+  (default 10, at most 3600), whichever comes first. NATS headers are returned as
+  `headers.<name>` fields.
 - `| natskv account=<account> bucket=<bucket> key=<key> [domain=<domain>]` -
   returns the revision history for a key in a JetStream KV bucket.
+
+### Sourcetypes
+
+Inputs and search commands use the same sourcetypes, with the same `source`
+(the subject or key), `host` (the connected NATS server's `host:port`) and
+`props.conf` settings (one event per message, `_time` set by the add-on rather
+than parsed from the payload):
+
+| Sourcetype | Used for | Search-time fields |
+|---|---|---|
+| `nats:message` | `nats_subscribe` input and `natssubscribe` default | automatic (`key=value` and JSON) |
+| `nats:json` | JSON message payloads (set it as the input's Source Type) | JSON |
+| `nats:kv` | `nats_kv` input and `natskv` default | JSON |
+
+Binary (non UTF-8) payloads are stored base64-encoded.
 
 ## Configuration
 
