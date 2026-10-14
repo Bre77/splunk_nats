@@ -34,6 +34,13 @@ from nats.errors import Error as NatsError
 from solnlib import conf_manager
 
 import nats
+from nats_decoder import (
+    DEFAULT_SOURCETYPE as DECODED_SOURCETYPE,
+    DecodeError,
+    Decoder,
+    DecoderConfigError,
+    render,
+)
 
 # Same sourcetype as the nats_subscribe input default, so input events and
 # command results share one props.conf stanza.
@@ -71,6 +78,7 @@ def generate(command_instance: Any) -> Generator[Dict[str, Any], None, None]:
         duration = _int_option(
             command_instance, "duration", DEFAULT_DURATION, minimum=1
         )
+        decoder = _decoder_option(command_instance)
 
         if not subject:
             raise ValueError("Subject parameter is required")
@@ -93,7 +101,7 @@ def generate(command_instance: Any) -> Generator[Dict[str, Any], None, None]:
             raise ValueError(f"Account configuration '{account}' not found or invalid")
 
         events = asyncio.run(
-            _collect_messages(subject, account_config, count, duration, logger)
+            _collect_messages(subject, account_config, count, duration, logger, decoder)
         )
     except USER_ERRORS as e:
         if logger:
@@ -117,6 +125,19 @@ def _int_option(command_instance: Any, name: str, default: int, minimum: int) ->
     if number < minimum:
         raise ValueError(f"{name} must be at least {minimum}, got {number}")
     return number
+
+
+def _decoder_option(command_instance: Any) -> Optional[Decoder]:
+    """Create the decoder= option's decoder, checking it before any message arrives."""
+    name = getattr(command_instance, "decoder", None)
+    if not name:
+        return None
+    try:
+        decoder = Decoder(name, getattr(command_instance, "decoder_args", None) or "")
+        decoder.check()
+    except (DecoderConfigError, DecodeError) as e:
+        raise ValueError(str(e))
+    return decoder
 
 
 def message_to_event(msg: Msg, host: str) -> Dict[str, Any]:
@@ -163,6 +184,7 @@ async def _collect_messages(
     count: int,
     duration: int,
     logger: Optional[Any] = None,
+    decoder: Optional[Decoder] = None,
 ) -> List[Dict[str, Any]]:
     """
     Async coroutine to connect to NATS and collect messages from a subject
@@ -173,12 +195,14 @@ async def _collect_messages(
         count: Stop after this many messages (0 = no limit)
         duration: Stop after this many seconds
         logger: Optional logger instance
+        decoder: Optional payload decoder, run once collecting has ended
 
     Returns:
         List of event dictionaries for Splunk
     """
     nc = None
     events: List[Dict[str, Any]] = []
+    messages: List[Msg] = []
     enough = asyncio.Event()
 
     try:
@@ -198,6 +222,7 @@ async def _collect_messages(
             if enough.is_set():
                 return
             events.append(message_to_event(msg, host))
+            messages.append(msg)
             if count and len(events) >= count:
                 enough.set()
 
@@ -208,6 +233,17 @@ async def _collect_messages(
             pass
         await sub.unsubscribe()
 
+        # Decode once collecting has ended, so a slow decoder does not hold up
+        # receiving. A payload that fails to decode keeps its base64 _raw.
+        if decoder is not None:
+            for event, msg in zip(events, messages):
+                rendered = await render(decoder, msg.data, msg.subject, msg.headers)
+                event["_raw"] = rendered.raw
+                if rendered.decoded:
+                    event["sourcetype"] = DECODED_SOURCETYPE
+                else:
+                    event["decode_error"] = rendered.error
+
     finally:
         if nc:
             try:
@@ -215,6 +251,8 @@ async def _collect_messages(
             except Exception as e:
                 if logger:
                     logger.warning("Failed to close NATS connection: %s", e)
+        if decoder is not None:
+            await decoder.close()
 
     return events
 

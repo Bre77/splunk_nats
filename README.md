@@ -12,6 +12,8 @@ The add-on is built with the [Splunk Add-on UCC Framework](https://splunk.github
   each received message. Subjects are dot-separated tokens: `*` matches exactly
   one token and `>` matches all remaining tokens, so `telemetry.*` matches
   `telemetry.a` but not `telemetry.a.data`, while `telemetry.>` matches both.
+  An optional [payload decoder](#payload-decoders) turns binary payloads, such as
+  protobuf, into JSON events.
 - **NATS KV** (`nats_kv`) - watches a NATS JetStream Key-Value bucket and indexes
   entries as they change. Progress is checkpointed to the Splunk KV Store (via
   `collections.conf` / `transforms.conf`) so a restart resumes from the last
@@ -19,11 +21,12 @@ The add-on is built with the [Splunk Add-on UCC Framework](https://splunk.github
 
 ### Custom search commands
 
-- `| natssubscribe subject=<subject> account=<account> [count=<int>] [duration=<int>]` -
+- `| natssubscribe subject=<subject> account=<account> [count=<int>] [duration=<int>] [decoder=<decoder>] [decoder_args=<arguments>]` -
   connects to NATS and returns the messages published to `subject` until `count`
   messages arrived (default 100, `0` for no limit) or `duration` seconds passed
   (default 10, at most 3600), whichever comes first. NATS headers are returned as
-  `headers.<name>` fields.
+  `headers.<name>` fields. With `decoder`, payloads are decoded by a
+  [payload decoder](#payload-decoders).
 - `| natskv account=<account> bucket=<bucket> key=<key> [domain=<domain>]` -
   returns the revision history for a key in a JetStream KV bucket.
 
@@ -37,7 +40,7 @@ than parsed from the payload):
 | Sourcetype | Used for | Search-time fields |
 |---|---|---|
 | `nats:message` | `nats_subscribe` input and `natssubscribe` default | automatic (`key=value` and JSON) |
-| `nats:json` | JSON message payloads (set it as the input's Source Type) | JSON |
+| `nats:json` | JSON message payloads (set it as the input's Source Type) and decoded payloads | JSON |
 | `nats:kv` | `nats_kv` input and `natskv` default | JSON |
 
 Binary (non UTF-8) payloads are stored base64-encoded.
@@ -50,6 +53,184 @@ Binary (non UTF-8) payloads are stored base64-encoded.
    optional; the password is stored encrypted in Splunk's credential store.
 2. On the **Inputs** page, create a **NATS Subscribe** or **NATS KV** input and
    select the account to use.
+3. Optionally, set a [payload decoder](#payload-decoders) on a NATS Subscribe input.
+
+## Payload decoders
+
+Without a decoder, a payload is indexed as-is when it is UTF-8 text and as base64
+otherwise, so binary formats such as protobuf, MessagePack or compressed data arrive
+with no fields. A decoder is an executable you provide that turns each payload into
+an event, normally JSON. It is written in any language and brings its own
+libraries: the add-on itself ships none.
+
+### Setting up a decoder
+
+1. Place the executable in `$SPLUNK_HOME/etc/apps/nats/local/decoders/`, readable
+   and executable by the user Splunk runs as. Splunk keeps the add-on's `local`
+   directory when the add-on is upgraded. Only executables in this directory can be
+   used: a decoder is set by its file name, never by a path.
+2. On a NATS Subscribe input, open **Payload decoder** and set **Decoder** to the file
+   name. **Decoder Arguments** are passed to it, quoted like a shell command line
+   (no shell is used). **Decoded Source Type** (default `nats:json`) is the source
+   type of decoded events.
+3. To try a decoder from search, pass it to `natssubscribe` and extract the fields
+   with `spath` (Splunk does not extract fields from a generating command's results):
+
+   ```
+   | natssubscribe subject="telemetry.>" account=my_account decoder=tesla | spath
+   ```
+
+Each input, and each `natssubscribe` search, starts the decoder once and keeps it
+running. It runs as the Splunk user, in the `local/decoders` directory, with
+Splunk's environment except the variables Splunk sets for its own Python, OpenSSL and
+libraries (`LD_LIBRARY_PATH`, `PYTHONPATH`, `PYTHONHOME`, `OPENSSL_CONF` and similar),
+so a system or virtualenv interpreter works as it does from a shell.
+
+### Decoder protocol
+
+The add-on and the decoder exchange one line per message:
+
+1. The add-on writes a JSON object and a newline to the decoder's stdin:
+
+   ```
+   {"subject":"telemetry.<VIN>.data","headers":{"traceparent":"00-..."},"payload":"Cg0IBBIJKQAAAAAAAPA/..."}
+   ```
+
+   `payload` is the message payload in base64, and `headers` holds the NATS message
+   headers (`{}` when there are none).
+2. The decoder writes the event and a newline to stdout, then flushes. The event is
+   normally a JSON object, which must fit on one line. An empty line means the
+   payload cannot be decoded.
+3. When its stdin closes, the decoder exits.
+
+Anything the decoder writes to stderr is diagnostic: the latest line is added to the
+error the add-on records. The request is JSON because a decoder already writes JSON
+events, so reading it needs nothing more, and fields can be added later without
+breaking existing decoders.
+
+### When decoding fails
+
+A payload is never dropped. When the decoder returns an empty line, exits, does not
+answer within 10 seconds, writes a line that is not UTF-8, or cannot be started, the
+payload is indexed as base64 with the input's own **Source Type** (`nats:message` by
+default), as it would be without a decoder. The error is logged to `splunkd.log`, the
+first at once and then at most one summary a minute:
+
+```
+index=_internal sourcetype=splunkd "Decoder 'tesla' failed to decode"
+```
+
+`natssubscribe` adds the error to each such result in a `decode_error` field, and
+fails with the reason when the decoder setting is invalid or the executable is
+missing.
+
+A decoder that exits or stops answering is stopped and started again for the next
+message, at most once a second; messages in between keep their base64 payload. An
+input whose decoder is not in place yet keeps indexing payloads as base64 and starts
+using the decoder as soon as it exists.
+
+Decoded events can be larger than Splunk's default 10,000-byte limit (Tesla alerts
+reach 16 KB); the `nats:json` source type allows 2 MiB. Give a custom **Decoded
+Source Type** the same `props.conf` settings as `nats:json`.
+
+### Throughput
+
+Keeping one decoder running is what makes decoding keep up with busy subjects.
+Measured on Splunk 10.4.1 with the Tesla example below and live `telemetry.>`
+traffic (about 125 small protobuf messages a second):
+
+| | per message | messages a second |
+|---|---|---|
+| Starting a fresh decoder process for each message | 34 ms | about 29, too slow for this stream |
+| One running decoder process (what the add-on does) | 0.05 ms (p99 0.3 ms) | about 19,000 |
+
+The input decodes messages one at a time in arrival order, so a decoder that takes
+longer per message than messages arrive falls behind, and NATS eventually drops
+messages for a consumer that is too slow.
+
+### Splunk Cloud Platform
+
+Splunk Cloud Platform does not let you place executables on its instances, so
+decoders cannot run there. Run inputs that need a decoder on a heavy forwarder you
+manage and forward the decoded events, or leave **Decoder** empty to index payloads
+as base64.
+
+### Example: Tesla Fleet Telemetry
+
+[Tesla Fleet Telemetry](https://github.com/teslamotors/fleet-telemetry) publishes
+protobuf on subjects such as `telemetry.<VIN>.data`, `.alerts`, `.errors` and
+`.connectivity`, each with its own message type (see `telemetry/record.go` in that
+repository). This example decoder is not part of the add-on. It keeps its own
+Python environment, outside Splunk, with the protobuf modules the repository
+publishes:
+
+```
+sudo mkdir -p /opt/nats-decoders/tesla && cd /opt/nats-decoders/tesla
+sudo git clone --depth 1 https://github.com/teslamotors/fleet-telemetry.git
+sudo python3 -m venv venv
+sudo venv/bin/pip install protobuf
+```
+
+Save this as `$SPLUNK_HOME/etc/apps/nats/local/decoders/tesla`, owned by the Splunk
+user, and make it executable (`chmod 755`):
+
+```python
+#!/opt/nats-decoders/tesla/venv/bin/python
+"""Tesla Fleet Telemetry decoder for the NATS Add-on for Splunk."""
+import base64
+import json
+import sys
+
+sys.path.insert(0, "/opt/nats-decoders/tesla/fleet-telemetry/protos/python")
+
+from google.protobuf.json_format import MessageToDict
+import vehicle_alert_pb2, vehicle_connectivity_pb2, vehicle_data_pb2, vehicle_error_pb2
+
+# The last subject token names the record type: telemetry.<VIN>.data and so on
+MESSAGES = {
+    "data": vehicle_data_pb2.Payload,
+    "alerts": vehicle_alert_pb2.VehicleAlerts,
+    "errors": vehicle_error_pb2.VehicleErrors,
+    "connectivity": vehicle_connectivity_pb2.VehicleConnectivity,
+}
+
+
+def decode(subject, payload):
+    message = MESSAGES[subject.rsplit(".", 1)[-1]].FromString(payload)
+    event = MessageToDict(message, preserving_proto_field_name=True)
+    # One field per signal ("VehicleSpeed": 42.0) instead of a list of key/value
+    # pairs. Signals the vehicle marks invalid are left out.
+    for datum in event.pop("data", []):
+        value = datum.get("value", {})
+        if "invalid" not in value:
+            event[datum["key"]] = next(iter(value.values()), None)
+    return json.dumps(event)
+
+
+for line in sys.stdin:
+    request = json.loads(line)
+    try:
+        event = decode(request["subject"], base64.b64decode(request["payload"]))
+    except Exception as e:
+        print(f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        event = ""  # an empty line keeps this payload as base64
+    print(event, flush=True)
+```
+
+Then create a NATS Subscribe input on `telemetry.>` with **Decoder** `tesla`. A
+vehicle data event has one field per signal:
+
+```
+{"created_at": "2026-10-14T22:05:44.515Z", "vin": "...", "VehicleSpeed": 28.6, "Gear": "ShiftStateD", "BatteryLevel": 76.5, "Location": {"latitude": ..., "longitude": ...}}
+```
+
+so searches such as these work directly:
+
+```
+index=nats source="*.data" VehicleSpeed=* | timechart avg(VehicleSpeed) by vin
+index=nats source="*.connectivity" | stats count by status network_interface
+index=nats source="*.alerts" | stats count by alerts{}.name
+```
 
 ## Requirements
 
@@ -77,6 +258,10 @@ package under `output/`.
 - `tests/e2e/search_commands_python.sh <package.tar.gz> <python-version> [image]`
   pins the search commands to that Splunk Python in a disposable container,
   imports every `bin/` module there and runs `natssubscribe` and `natskv`.
+- `tests/e2e/decoder_e2e.sh <package.tar.gz> [image]` runs a payload decoder in a
+  disposable Splunk container next to a NATS server, and checks that decodable
+  payloads are indexed as JSON and undecodable ones as base64 with the failure
+  logged.
 
 ## Continuous integration & publishing
 

@@ -183,10 +183,75 @@
                                     "maxLength": 100
                                 }
                             ]
+                        },
+                        {
+                            "type": "text",
+                            "label": "Decoder",
+                            "field": "decoder",
+                            "help": "Optional. File name of an executable in $SPLUNK_HOME/etc/apps/nats/local/decoders/ that the input keeps running to turn each payload into an event, normally JSON. Not available on Splunk Cloud Platform.",
+                            "required": false,
+                            "validators": [
+                                {
+                                    "type": "regex",
+                                    "errorMsg": "Decoder must be a file name in local/decoders/, such as my_decoder or my_decoder.py.",
+                                    "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+                                },
+                                {
+                                    "type": "string",
+                                    "errorMsg": "Decoder should be between 1 and 100 characters",
+                                    "minLength": 1,
+                                    "maxLength": 100
+                                }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "label": "Decoder Arguments",
+                            "field": "decoder_args",
+                            "help": "Optional arguments for the decoder, quoted like a shell command line. No shell is used.",
+                            "required": false,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "Decoder arguments should be between 1 and 1000 characters",
+                                    "minLength": 1,
+                                    "maxLength": 1000
+                                }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "label": "Decoded Source Type",
+                            "field": "decoded_sourcetype",
+                            "help": "Source type for decoded events. Payloads that fail to decode are indexed as base64 with the Source Type above.",
+                            "required": false,
+                            "defaultValue": "nats:json",
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "Decoded source type should be between 1 and 100 characters",
+                                    "minLength": 1,
+                                    "maxLength": 100
+                                }
+                            ]
                         }
                     ],
                     "inputHelperModule": "nats_subscribe_helper",
-                    "title": "NATS Subscribe"
+                    "title": "NATS Subscribe",
+                    "groups": [
+                        {
+                            "label": "Payload decoder",
+                            "fields": [
+                                "decoder",
+                                "decoder_args",
+                                "decoded_sourcetype"
+                            ],
+                            "options": {
+                                "isExpandable": true,
+                                "expand": false
+                            }
+                        }
+                    ]
                 },
                 {
                     "name": "nats_kv",
@@ -358,6 +423,10 @@
                         "field": "sourcetype"
                     },
                     {
+                        "label": "Decoder",
+                        "field": "decoder"
+                    },
+                    {
                         "label": "Status",
                         "field": "disabled",
                         "mapping": {
@@ -390,8 +459,8 @@
             "fileName": "nats_subscribe_command.py",
             "commandType": "generating",
             "requiredSearchAssistant": true,
-            "description": "Subscribe to a NATS subject and return the messages received, stopping after count messages (default 100, 0 for no limit) or duration seconds (default 10), whichever comes first",
-            "syntax": "| natssubscribe subject=<subject> account=<account> [count=<int>] [duration=<int>]",
+            "description": "Subscribe to a NATS subject and return the messages received, stopping after count messages (default 100, 0 for no limit) or duration seconds (default 10), whichever comes first. decoder names a payload decoder in local/decoders and decoder_args passes it arguments",
+            "syntax": "| natssubscribe subject=<subject> account=<account> [count=<int>] [duration=<int>] [decoder=<name>]",
             "usage": "public",
             "arguments": [
                 {
@@ -418,6 +487,14 @@
                         "minimum": 1,
                         "maximum": 3600
                     }
+                },
+                {
+                    "name": "decoder",
+                    "required": false
+                },
+                {
+                    "name": "decoder_args",
+                    "required": false
                 }
             ]
         },
