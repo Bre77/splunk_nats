@@ -22,7 +22,6 @@ UCC will call validate_input() during configuration validation and stream_events
 """
 
 import asyncio
-import base64
 import logging
 import os
 import sys
@@ -38,6 +37,15 @@ from solnlib import conf_manager
 from splunklib import modularinput as smi
 
 import nats
+from nats_decoder import (
+    DEFAULT_SOURCETYPE,
+    BrokenDecoder,
+    DecodeError,
+    Decoder,
+    DecodeErrorLog,
+    DecoderConfigError,
+    render,
+)
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -113,6 +121,9 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
                     account_config=account_config,
                     sourcetype=sourcetype,
                     event_writer=event_writer,
+                    decoder=_create_decoder(input_item),
+                    decoded_sourcetype=input_item.get("decoded_sourcetype")
+                    or DEFAULT_SOURCETYPE,
                 )
             )
 
@@ -127,6 +138,8 @@ async def _subscribe_to_nats(
     account_config: Dict[str, Any],
     sourcetype: str,
     event_writer: smi.EventWriter,
+    decoder: Optional[Decoder] = None,
+    decoded_sourcetype: str = DEFAULT_SOURCETYPE,
 ) -> None:
     """
     Subscribe to NATS topic and stream messages continuously.
@@ -137,8 +150,13 @@ async def _subscribe_to_nats(
         account_config: Account configuration dictionary
         sourcetype: Sourcetype for events
         event_writer: EventWriter for outputting events
+        decoder: Optional payload decoder
+        decoded_sourcetype: Sourcetype for decoded events
     """
     nc = None
+    decode_errors = (
+        DecodeErrorLog(logger.warning, decoder.name) if decoder is not None else None
+    )
 
     try:
         # Connection options
@@ -163,23 +181,18 @@ async def _subscribe_to_nats(
                 if nc.connected_url:
                     connected_host = nc.connected_url.netloc
 
-                # Handle the message data - decode to string for _raw
-                if msg.data:
-                    try:
-                        # Try to decode as UTF-8
-                        data_str = msg.data.decode("utf-8")
-                    except UnicodeDecodeError:
-                        # If it's not valid UTF-8, encode as base64
-                        data_str = base64.b64encode(msg.data).decode("ascii")
-                else:
-                    data_str = ""
+                # Render the payload for _raw: the decoder's event when a decoder is
+                # set, otherwise UTF-8 text or base64. Failed decodes keep the payload.
+                rendered = await render(decoder, msg.data, msg.subject, msg.headers)
+                if rendered.error is not None and decode_errors is not None:
+                    decode_errors.record(msg.subject, rendered.error)
 
                 # Create the Splunk event with only the message data in _raw
                 event = smi.Event(
-                    data=data_str,
+                    data=rendered.raw,
                     time=time.time(),
                     source=msg.subject,
-                    sourcetype=sourcetype,
+                    sourcetype=decoded_sourcetype if rendered.decoded else sourcetype,
                     host=connected_host,
                 )
 
@@ -214,6 +227,28 @@ async def _subscribe_to_nats(
                 await nc.close()
             except Exception:
                 pass
+        if decoder is not None:
+            await decoder.close()
+
+
+def _create_decoder(input_item: Dict[str, Any]) -> Optional[Decoder]:
+    """
+    Create the input's payload decoder, if it has one. A decoder problem must not
+    stop ingestion: payloads are then kept as base64 and the reason is logged.
+    """
+    name = (input_item.get("decoder") or "").strip()
+    if not name:
+        return None
+    try:
+        decoder = Decoder(name, input_item.get("decoder_args") or "")
+    except DecoderConfigError as e:
+        logger.error(f"{e}; payloads will be kept as base64")
+        return BrokenDecoder(name, str(e))
+    try:
+        decoder.check()
+    except DecodeError as e:
+        logger.error(f"{e}; payloads are kept as base64 until it is in place")
+    return decoder
 
 
 def _get_account_config(
