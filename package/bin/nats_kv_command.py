@@ -17,20 +17,21 @@
 import asyncio
 import os
 import sys
-import time
 
 # Add the lib directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
-# These imports are not needed for UCC custom search commands
-# UCC generates the command wrapper automatically
-import base64
-
 from nats.errors import Error as NatsError
-from nats.js.errors import KeyNotFoundError, NoKeysError
 from solnlib import conf_manager
 
 import nats
+from nats_kv_common import (
+    entry_operation,
+    entry_raw,
+    entry_time,
+    kv_error_message,
+    read_history,
+)
 
 
 # Same sourcetype as the nats_kv input default, so input events and command
@@ -55,6 +56,7 @@ def generate(command_instance):
         Dict: Event dictionaries for Splunk
     """
     logger = getattr(command_instance, "logger", None)
+    bucket = domain = None
     try:
         # Get command arguments
         bucket = getattr(command_instance, "bucket", None)
@@ -96,7 +98,9 @@ def generate(command_instance):
         if logger:
             logger.error("natskv failed: %s", e)
         # Writes one ERROR message and exits; no generic re-raise location.
-        command_instance.error_exit(e, str(e))
+        command_instance.error_exit(
+            e, kv_error_message(e, bucket, domain, "domain=<domain>")
+        )
         return
 
     yield from events
@@ -143,44 +147,21 @@ async def _get_kv_history(bucket, key, account_config, logger=None, domain=None)
 
         # Get JetStream context and KV bucket
         js = nc.jetstream(domain=domain)
-        kv = await js.key_value(bucket)
+        await js.key_value(bucket)  # BucketNotFoundError if it does not exist
 
-        # Get the history for the key
-        try:
-            entries = await kv.history(key)
-
-            # Convert entries to Splunk events
-            for entry in entries:
-                try:
-                    # Handle the value - decode to string for _raw
-                    if not entry.value:
-                        continue
-                    try:
-                        value_str = entry.value.decode("utf-8")
-                    except UnicodeDecodeError:
-                        value_str = base64.b64encode(entry.value).decode("ascii")
-
-                    # Create the Splunk event
-                    event = {
-                        "_time": entry.created.timestamp()
-                        if entry.created
-                        else time.time(),
-                        "_raw": value_str,
-                        "source": entry.key,
-                        "sourcetype": SOURCETYPE,
-                        "host": connected_host,
-                        "revision": entry.revision,
-                    }
-
-                    events.append(event)
-
-                except Exception as e:
-                    if logger:
-                        logger.error("Failed to process entry: %s", str(e))
-
-        except (KeyNotFoundError, NoKeysError):
-            # No entries found - just return empty list
-            pass
+        # Convert the entries (including delete and purge markers) to Splunk events
+        for entry in await read_history(js, bucket, key):
+            events.append(
+                {
+                    "_time": entry_time(entry),
+                    "_raw": entry_raw(entry),
+                    "source": entry.key,
+                    "sourcetype": SOURCETYPE,
+                    "host": connected_host,
+                    "revision": entry.revision,
+                    "operation": entry_operation(entry),
+                }
+            )
 
     except Exception as e:
         if logger:

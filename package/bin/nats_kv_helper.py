@@ -18,35 +18,72 @@ NATS JetStream Key-Value Input Helper Module
 This module provides the input helper functions for collecting data from NATS JetStream KV buckets.
 UCC will call validate_input() during configuration validation and stream_events() during data collection.
 
+Every put, delete and purge in the bucket is written as an event whose time is the
+entry's created time. Delete and purge markers carry no value, so they are written as
+a JSON record with the key, the operation and the revision.
+
 Checkpointing:
-This module implements checkpointing to prevent reingesting the same data on restart.
-- Checkpoints are stored using Splunk's KVStore via solnlib.modular_input.checkpointer
-- Each input stores its last processed revision number as the checkpoint
-- On startup, the module resumes from the last checkpoint to avoid duplicate events
-- The checkpoint is updated after successfully processing each batch of events
-- Configuration files required: collections.conf and transforms.conf for the checkpointer
+- Each input stores the last processed revision (the bucket stream sequence) in the
+  Splunk KV Store collection nats_kv_checkpointer via solnlib's KVStoreCheckpointer
+- Events are held for at most CHECKPOINT_INTERVAL seconds (and written as soon as
+  the initial snapshot has been read), then the checkpoint is saved and only then
+  are the events written. The checkpoint therefore always covers exactly the events
+  written, so stopping the input never needs a final save.
+- During a Splunk restart splunkd stops serving the KV Store well before it stops
+  inputs, while still indexing what they write. A save that fails holds the events
+  back and pauses reading; if Splunk then stops the input, the held events were
+  never written and are read again after the restart, so they are neither lost nor
+  duplicated.
+- On startup the input asks JetStream for entries after the checkpointed revision, so
+  history is not replayed and a restart does not duplicate events. If the KV Store is
+  not ready yet (it can still be initializing after Splunk starts), the input waits for
+  it rather than reading the bucket from the beginning.
 """
 
 import asyncio
-import base64
+import json
 import logging
 import os
+import signal
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # Add the lib directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 # Import Splunk libraries
 from solnlib import conf_manager
+from solnlib import splunk_rest_client
 from solnlib.modular_input import checkpointer
 from splunklib import modularinput as smi
 
 import nats
+from nats.js import api
+
+from nats_kv_common import (
+    entry_from_msg,
+    entry_raw,
+    entry_time,
+    kv_error_message,
+    kv_stream,
+    kv_subject_prefix,
+)
 
 # Set up logger
 logger = logging.getLogger(__name__)
+
+# Longest time an event is held before its checkpoint is saved and it is written
+CHECKPOINT_INTERVAL = 1
+
+# Seconds between attempts to save the checkpoint once a save has failed
+SAVE_RETRY_INTERVAL = 10
+
+# Seconds to wait for an entry when there is nothing to checkpoint
+IDLE_TIMEOUT = 60
+
+# Seconds between attempts to read the checkpoint while the KV Store is not ready
+KVSTORE_RETRY_INTERVAL = 5
 
 
 def validate_input(definition: smi.ValidationDefinition) -> None:
@@ -82,7 +119,7 @@ def validate_input(definition: smi.ValidationDefinition) -> None:
         )
         if not all(c in valid_chars for c in bucket):
             raise ValueError(
-                "Bucket name must contain only alphanumeric characters, hyphens, underscores, and periods"
+                "Bucket name must contain only letters, digits, hyphens and underscores"
             )
 
         # Try to get account configuration to validate it exists
@@ -123,77 +160,182 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             if not account_config:
                 raise Exception(f"Account configuration '{account}' not found")
 
-            # Set up checkpointing
-            kvstore_checkpointer = None
-            current_checkpoint = None
-            checkpointer_key_name = None
+            checkpoint = _open_checkpoint(session_key, input_name, bucket, domain)
 
-            try:
-                kvstore_checkpointer = checkpointer.KVStoreCheckpointer(
-                    "nats_kv_checkpointer",
-                    session_key,
-                    "nats",
-                )
-
-                # Get checkpoint key for this input
-                checkpointer_key_name = _get_checkpointer_key_name(input_name)
-                current_checkpoint = kvstore_checkpointer.get(checkpointer_key_name)
-
-                if current_checkpoint is not None:
-                    logger.info(
-                        f"Resuming from checkpoint revision {current_checkpoint} for input {input_name}"
-                    )
-                else:
-                    logger.info(
-                        f"No checkpoint found, starting from beginning for input {input_name}"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to initialize checkpointer for input {input_name}: {str(e)}. "
-                    "Continuing without checkpointing."
-                )
-                kvstore_checkpointer = None
-                current_checkpoint = None
-
-            # Monitor NATS JetStream KV bucket
-            last_revision = asyncio.run(
+            # Monitor NATS JetStream KV bucket until Splunk stops the input
+            _run_until_stopped(
                 _monitor_kv_bucket(
                     bucket=bucket,
                     subject=subject,
                     account_config=account_config,
                     sourcetype=sourcetype,
                     event_writer=event_writer,
-                    starting_revision=current_checkpoint,
+                    checkpoint=checkpoint,
                     domain=domain,
                 )
             )
 
-            # Update checkpoint with the last processed revision
-            if (
-                last_revision is not None
-                and kvstore_checkpointer is not None
-                and checkpointer_key_name is not None
-            ):
-                try:
-                    kvstore_checkpointer.update(checkpointer_key_name, last_revision)
-                    logger.info(
-                        f"Updated checkpoint to revision {last_revision} for input {input_name}"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to update checkpoint for input {input_name}: {str(e)}"
-                    )
-            else:
-                if last_revision is None:
-                    logger.info(f"No new events processed for input {input_name}")
-                else:
-                    logger.warning(
-                        f"Checkpointer not available, cannot save checkpoint for input {input_name}"
-                    )
-
         except Exception as e:
             # Log error instead of writing as event
             logger.error(f"Failed to monitor NATS KV bucket: {str(e)}")
+
+
+class Checkpoint:
+    """
+    The last processed revision of one input, persisted to the KV Store.
+
+    The stored state records the bucket and domain it belongs to, so editing an
+    input to watch a different bucket starts that bucket from the beginning
+    instead of skipping its entries.
+    """
+
+    def __init__(
+        self, store: Any, key: str, bucket: str, domain: Optional[str]
+    ) -> None:
+        self._store = store
+        self._key = key
+        self._bucket = bucket
+        self._domain = domain or ""
+        self.revision: Optional[int] = None
+        self.saved_revision: Optional[int] = None
+        self.save_failed = False
+        self._saved_at = 0.0
+
+    def load(self) -> Optional[int]:
+        """
+        Read the checkpoint; returns the last processed revision or None.
+
+        Raises:
+            Exception: If the KV Store could not be read
+        """
+        state = self._store.get(self._key)
+        if (
+            isinstance(state, dict)
+            and state.get("bucket") == self._bucket
+            and state.get("domain", "") == self._domain
+            and isinstance(state.get("revision"), int)
+        ):
+            self.revision = self.saved_revision = state["revision"]
+            logger.info(f"Resuming input {self._key} after revision {self.revision}")
+        elif state is not None:
+            logger.warning(
+                f"Ignoring checkpoint for input {self._key} that does not match "
+                f"bucket '{self._bucket}'; reading the bucket from the beginning"
+            )
+        else:
+            logger.info(
+                f"No checkpoint found, reading input {self._key} from the beginning"
+            )
+        return self.revision
+
+    def reset(self) -> None:
+        """Forget the revision so the bucket is read from the beginning."""
+        self.revision = None
+        self.saved_revision = None
+
+    @property
+    def unsaved(self) -> bool:
+        """Whether the revision changed since the last save."""
+        return self.revision is not None and self.revision != self.saved_revision
+
+    def seconds_until_due(self) -> float:
+        """Seconds until the next save is due."""
+        interval = SAVE_RETRY_INTERVAL if self.save_failed else CHECKPOINT_INTERVAL
+        return max(0.0, self._saved_at + interval - time.monotonic())
+
+    def save(self) -> bool:
+        """Persist the revision if it changed; returns False if that failed."""
+        if not self.unsaved:
+            return True
+        self._saved_at = time.monotonic()
+        state = {
+            "bucket": self._bucket,
+            "domain": self._domain,
+            "revision": self.revision,
+        }
+        try:
+            self._store.update(self._key, state)
+        except Exception as e:
+            if not self.save_failed:
+                logger.warning(
+                    f"Failed to save checkpoint for {self._key}, holding events "
+                    f"until the KV Store is available: {str(e)}"
+                )
+            self.save_failed = True
+            return False
+        self.saved_revision = self.revision
+        self.save_failed = False
+        logger.debug(f"Saved checkpoint revision {self.revision} for {self._key}")
+        return True
+
+
+def _open_checkpoint(
+    session_key: str, input_name: str, bucket: str, domain: Optional[str]
+) -> Checkpoint:
+    """
+    Load the input's checkpoint, waiting until the KV Store can serve it.
+
+    Starting without the checkpoint would index the whole bucket again, so a KV
+    Store that is still initializing, or unavailable, delays the input instead.
+    """
+    last_warning = None
+    while True:
+        try:
+            status = _kvstore_status(session_key)
+            if status == "ready":
+                store = checkpointer.KVStoreCheckpointer(
+                    "nats_kv_checkpointer", session_key, "nats"
+                )
+                checkpoint = Checkpoint(
+                    store, _get_checkpointer_key_name(input_name), bucket, domain
+                )
+                checkpoint.load()
+                return checkpoint
+            reason = f"KV Store status is '{status}'"
+        except Exception as e:
+            reason = str(e)
+        if last_warning is None or time.monotonic() - last_warning >= 60:
+            last_warning = time.monotonic()
+            logger.warning(
+                f"Waiting for the KV Store to read the checkpoint of input "
+                f"{input_name}: {reason}"
+            )
+        time.sleep(KVSTORE_RETRY_INTERVAL)
+
+
+def _kvstore_status(session_key: str) -> str:
+    """Return the KV Store status reported by splunkd, e.g. 'ready' or 'starting'."""
+    response = splunk_rest_client.SplunkRestClient(session_key, "nats").get(
+        "kvstore/status", output_mode="json"
+    )
+    content = json.loads(response.body.read())["entry"][0]["content"]
+    return content["current"]["status"]
+
+
+def _run_until_stopped(coro: Any) -> None:
+    """
+    Run the monitor coroutine, cancelling it when Splunk sends SIGTERM (input
+    disabled, or Splunk stopping) so its cleanup saves the checkpoint.
+    """
+
+    async def main() -> bool:
+        task = asyncio.ensure_future(coro)
+        try:
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
+        except (NotImplementedError, RuntimeError):
+            # Signal handlers are not available on Windows event loops
+            pass
+        try:
+            await task
+        except asyncio.CancelledError:
+            return True
+        return False
+
+    if asyncio.run(main()):
+        logger.info("NATS KV input stopped")
+        # Splunk closes the event pipe when it stops an input, so exit now
+        # instead of letting splunklib write the closing </stream> tag into it.
+        sys.exit(0)
 
 
 async def _monitor_kv_bucket(
@@ -202,23 +344,21 @@ async def _monitor_kv_bucket(
     account_config: Dict[str, Any],
     sourcetype: str,
     event_writer: smi.EventWriter,
-    starting_revision: Optional[int] = None,
+    checkpoint: Checkpoint,
     domain: Optional[str] = None,
-) -> Optional[int]:
+) -> None:
     """
-    Monitor NATS JetStream KV bucket for changes.
+    Write every change in a NATS JetStream KV bucket as an event, starting after
+    the checkpointed revision, until cancelled.
 
     Args:
         bucket: KV bucket name
-        subject: Subject pattern to watch
+        subject: Key filter to watch (NATS wildcards allowed)
         account_config: Account configuration dictionary
         sourcetype: Sourcetype for events
         event_writer: EventWriter for outputting events
-        starting_revision: Optional revision number to start from
+        checkpoint: Checkpoint holding the last processed revision
         domain: Optional JetStream domain
-
-    Returns:
-        Last processed revision number, or None if no events processed
     """
     nc = None
     try:
@@ -239,65 +379,117 @@ async def _monitor_kv_bucket(
         # Get JetStream context and KV bucket
         js = nc.jetstream(domain=domain)
         kv = await js.key_value(bucket)
+        status = await kv.status()
 
         # Get the connected server URL for the host field
         connected_host = "unknown"
         if nc.connected_url:
             connected_host = nc.connected_url.netloc
 
-        # Create a watcher for the subject pattern
-        # Always include history to catch up on missed entries when resuming
-        watcher = await kv.watch(subject, include_history=True)
+        # A checkpoint past the bucket's last revision means the bucket was
+        # recreated, so its revisions started again from 1.
+        last_revision = status.stream_info.state.last_seq
+        if checkpoint.revision is not None and checkpoint.revision > last_revision:
+            logger.warning(
+                f"Checkpoint revision {checkpoint.revision} is past the last revision "
+                f"{last_revision} of bucket '{bucket}' (was it recreated?); "
+                "reading the bucket from the beginning"
+            )
+            checkpoint.reset()
 
-        last_revision = None
+        # Read the bucket stream directly with an ordered consumer, which (unlike
+        # kv.watch) can start after the checkpointed revision.
+        config = None
+        deliver_policy = api.DeliverPolicy.ALL
+        if checkpoint.revision is not None:
+            deliver_policy = api.DeliverPolicy.BY_START_SEQUENCE
+            config = api.ConsumerConfig(opt_start_seq=checkpoint.revision + 1)
+        sub = await js.subscribe(
+            f"{kv_subject_prefix(bucket)}{subject}",
+            stream=kv_stream(bucket),
+            config=config,
+            ordered_consumer=True,
+            deliver_policy=deliver_policy,
+            inactive_threshold=5 * 60,
+        )
 
-        # Process watcher events
-        async for entry in watcher:
-            if entry is None or not entry.value:
-                continue
-
-            # Skip entries we've already processed
-            if starting_revision is not None and entry.revision <= starting_revision:
-                logger.debug(
-                    f"Skipping already processed entry at revision {entry.revision}"
-                )
-                continue
-
-            # Determine the raw value to write
+        batch: List[smi.Event] = []
+        snapshot_done = False
+        while True:
+            # Wait for the next entry, but no longer than until the held events
+            # are due to be checkpointed and written.
+            timeout = IDLE_TIMEOUT
+            if checkpoint.unsaved:
+                timeout = checkpoint.seconds_until_due()
+                if checkpoint.save_failed and timeout > 0:
+                    # The KV Store is unavailable (e.g. Splunk is stopping):
+                    # stop reading until the held events can be checkpointed.
+                    await asyncio.sleep(timeout)
+                    continue
+                if timeout == 0:
+                    _write_batch(batch, checkpoint, event_writer)
+                    continue
             try:
-                raw_value = entry.value.decode("utf-8")
-            except UnicodeDecodeError:
-                raw_value = base64.b64encode(entry.value).decode("ascii")
+                msg = await sub.next_msg(timeout=timeout)
+            except nats.errors.TimeoutError:
+                continue
 
-            # Create and write the Splunk event
-            event = smi.Event(
-                data=raw_value,
-                time=entry.created or time.time(),
-                source=f"{bucket}.{entry.key}",
-                sourcetype=sourcetype,
-                host=connected_host,
-            )
+            entry = entry_from_msg(bucket, msg)
+            if entry is not None:
+                batch.append(
+                    smi.Event(
+                        data=entry_raw(entry),
+                        time=entry_time(entry),
+                        source=f"{bucket}.{entry.key}",
+                        sourcetype=sourcetype,
+                        host=connected_host,
+                    )
+                )
+            checkpoint.revision = msg.metadata.sequence.stream
 
-            event_writer.write_event(event)
-            last_revision = entry.revision
-            logger.debug(
-                f"Processed entry at revision {entry.revision} for key {entry.key}"
-            )
-
-        return last_revision
+            if not snapshot_done and msg.metadata.num_pending == 0:
+                snapshot_done = True
+                logger.info(
+                    f"Read bucket '{bucket}' up to revision {checkpoint.revision}; "
+                    "watching for changes"
+                )
+                _write_batch(batch, checkpoint, event_writer)
 
     except Exception as e:
         logger.error(
-            f"Failed to monitor KV bucket '{bucket}' with pattern '{subject}': {str(e)}"
+            f"Failed to monitor KV bucket '{bucket}' with pattern '{subject}': "
+            f"{kv_error_message(e, bucket, domain, 'the Domain field')}"
         )
-        return None
 
     finally:
+        # Events still held were not checkpointed, so they are read again next time
         if nc:
             try:
                 await nc.close()
             except Exception:
                 pass
+
+
+def _write_batch(
+    batch: List[smi.Event], checkpoint: Checkpoint, event_writer: smi.EventWriter
+) -> None:
+    """
+    Save the checkpoint for the held events, then write them. If the save fails
+    the events stay held. If writing fails after the save (Splunk closed the
+    event pipe), the checkpoint is moved back so the events are read again.
+    """
+    previous = checkpoint.saved_revision
+    if not checkpoint.save():
+        return
+    try:
+        for event in batch:
+            event_writer.write_event(event)
+    except Exception:
+        # Revision 0 means "nothing written yet", so the bucket is read in full
+        checkpoint.revision = previous if previous is not None else 0
+        checkpoint.save()
+        raise
+    batch.clear()
 
 
 def _get_account_config(

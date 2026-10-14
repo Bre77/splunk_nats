@@ -334,7 +334,7 @@
                             "type": "text",
                             "label": "Subject",
                             "field": "subject",
-                            "help": "NATS JetStream KV subject pattern to watch (supports wildcards like *.events or foo.>)",
+                            "help": "Keys to watch in the bucket. NATS wildcards are allowed, e.g. config.* or config.>; > watches every key.",
                             "required": false,
                             "defaultValue": ">",
                             "validators": [

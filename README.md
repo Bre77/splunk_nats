@@ -15,7 +15,9 @@ The add-on is built with the [Splunk Add-on UCC Framework](https://splunk.github
   An optional [payload decoder](#payload-decoders) turns binary payloads, such as
   protobuf, into JSON events.
 - **NATS KV** (`nats_kv`) - watches a NATS JetStream Key-Value bucket and indexes
-  entries as they change. Progress is checkpointed to the Splunk KV Store (via
+  entries as they change, timestamped with each entry's created time. Deletes and
+  purges are indexed too, as JSON records with `key`, `operation` (`DEL` or
+  `PURGE`) and `revision`. Progress is checkpointed to the Splunk KV Store (via
   `collections.conf` / `transforms.conf`) so a restart resumes from the last
   processed revision instead of re-ingesting history.
 
@@ -28,7 +30,10 @@ The add-on is built with the [Splunk Add-on UCC Framework](https://splunk.github
   `headers.<name>` fields. With `decoder`, payloads are decoded by a
   [payload decoder](#payload-decoders).
 - `| natskv account=<account> bucket=<bucket> key=<key> [domain=<domain>]` -
-  returns the revision history for a key in a JetStream KV bucket.
+  returns the revision history for a key in a JetStream KV bucket, including
+  deletes and purges (each result has an `operation` field: `PUT`, `DEL` or
+  `PURGE`). If JetStream does not respond, the server may use a JetStream domain:
+  pass `domain=<domain>`.
 
 ### Sourcetypes
 
@@ -251,7 +256,8 @@ package under `output/`.
 ## Testing
 
 - `tests/unit` (pytest) runs the add-on code from `package/bin` against the
-  dependencies in `tests/requirements.txt`.
+  dependencies in `tests/requirements.txt`. The KV tests start a throwaway
+  `nats-server` with JetStream, so put `nats-server` on `PATH` (they skip without it).
 - `tests/package` (stdlib unittest) imports every module of the built add-on in
   `output/nats` with its vendored `lib/`, so build first and run it on each
   supported runtime: `python3.9 -m unittest discover -s tests/package` (and 3.13).
