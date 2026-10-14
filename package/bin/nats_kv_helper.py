@@ -110,7 +110,7 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             bucket = input_item.get("bucket")
             subject = input_item.get("subject", "*")
             account = input_item.get("account")
-            sourcetype = input_item.get("sourcetype", "nats:json")
+            sourcetype = input_item.get("sourcetype") or "nats:kv"
             domain = input_item.get("domain")
 
             # Get session key for configuration access

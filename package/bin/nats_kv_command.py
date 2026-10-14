@@ -26,10 +26,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 # UCC generates the command wrapper automatically
 import base64
 
+from nats.errors import Error as NatsError
 from nats.js.errors import KeyNotFoundError, NoKeysError
 from solnlib import conf_manager
 
 import nats
+
+
+# Same sourcetype as the nats_kv input default, so input events and command
+# results share one props.conf stanza.
+SOURCETYPE = "nats:kv"
+
+# Errors that are about the user's input or environment, not a bug in this
+# command. They are reported as a single clean message; anything else is left
+# to propagate so splunklib names the file and line where it really happened.
+USER_ERRORS = (ValueError, OSError, asyncio.TimeoutError, NatsError)
 
 
 def generate(command_instance):
@@ -43,15 +54,13 @@ def generate(command_instance):
     Yields:
         Dict: Event dictionaries for Splunk
     """
+    logger = getattr(command_instance, "logger", None)
     try:
         # Get command arguments
         bucket = getattr(command_instance, "bucket", None)
         key = getattr(command_instance, "key", ">")
         account = getattr(command_instance, "account", None)
         domain = getattr(command_instance, "domain", None)
-
-        # Get logger if available
-        logger = getattr(command_instance, "logger", None)
 
         # Convert parameters to strings and validate
         if bucket is not None:
@@ -80,19 +89,17 @@ def generate(command_instance):
         if not account_config:
             raise ValueError(f"Account configuration '{account}' not found or invalid")
 
-        # Run the async function to get KV history
-        try:
-            events = asyncio.run(_get_kv_history(bucket, key, account_config, logger, domain))
-            for event in events:
-                yield event
+        events = asyncio.run(
+            _get_kv_history(bucket, key, account_config, logger, domain)
+        )
+    except USER_ERRORS as e:
+        if logger:
+            logger.error("natskv failed: %s", e)
+        # Writes one ERROR message and exits; no generic re-raise location.
+        command_instance.error_exit(e, str(e))
+        return
 
-        except Exception as e:
-            if logger:
-                logger.error("Error retrieving KV history: %s", str(e))
-            raise RuntimeError(f"Failed to retrieve KV history: {str(e)}")
-
-    except Exception as e:
-        raise RuntimeError(str(e))
+    yield from events
 
 
 async def _get_kv_history(bucket, key, account_config, logger=None, domain=None):
@@ -160,7 +167,7 @@ async def _get_kv_history(bucket, key, account_config, logger=None, domain=None)
                         else time.time(),
                         "_raw": value_str,
                         "source": entry.key,
-                        "sourcetype": "nats:json",
+                        "sourcetype": SOURCETYPE,
                         "host": connected_host,
                         "revision": entry.revision,
                     }
@@ -247,6 +254,6 @@ def _get_account_config(command_instance, account_name):
         return config
 
     except Exception as e:
-        raise Exception(
+        raise ValueError(
             f"Failed to get account configuration '{account_name}': {str(e)}"
         )
