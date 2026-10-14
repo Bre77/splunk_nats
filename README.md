@@ -54,8 +54,21 @@ Binary (non UTF-8) payloads are stored base64-encoded.
 
 1. Open the add-on's **Configuration** page and create an **Account** with the
    NATS server URL(s) (comma-separated, e.g.
-   `nats://demo.nats.io:4222,tls://demo.nats.io:4443`). Username/password are
-   optional; the password is stored encrypted in Splunk's credential store.
+   `nats://demo.nats.io:4222,tls://demo.nats.io:4443`) and how to authenticate:
+   - **Username / Password**, **Token**, **NKey Seed** (`SU...`), or
+     **Credentials File** (the full content of a `.creds` file, for decentralized
+     JWT authentication). Use either an NKey seed or a credentials file, not both.
+   - **TLS**: CA certificates (PEM; empty uses the system trust store), a client
+     certificate and unencrypted key for mutual TLS, **Verify Server Certificate**
+     (on by default) and **TLS Handshake First** for servers configured with
+     `handshake_first`. TLS is used for `tls://` URLs, when any TLS option is set,
+     or when the server requires it.
+   - **Connect Timeout** (seconds per server, default 10).
+
+   Passwords, tokens, NKey seeds, credentials files and TLS client keys are stored
+   encrypted in Splunk's credential store. Saving an Account test-connects to NATS,
+   so a wrong server, credential or TLS setting is rejected with the reason
+   (for example `Authorization violation`, `Connection refused` or a TLS error).
 2. On the **Inputs** page, create a **NATS Subscribe** or **NATS KV** input and
    select the account to use.
 3. Optionally, set a [payload decoder](#payload-decoders) on a NATS Subscribe input.
@@ -237,12 +250,23 @@ index=nats source="*.connectivity" | stats count by status network_interface
 index=nats source="*.alerts" | stats count by alerts{}.name
 ```
 
+Inputs keep running through connection problems: when the connection drops or
+cannot be made they retry forever with capped exponential backoff and jitter
+(up to 20 seconds between attempts), re-reading the Account before every attempt
+so a corrected Account takes effect without restarting Splunk. Each disconnect,
+reconnect and new failure reason is logged once. Messages published while an
+input is disconnected are not received (core NATS has no replay). The search
+commands make one connection attempt bounded by the connect timeout and fail with
+the real cause.
+
 ## Requirements
 
 - Splunk Enterprise 9.x or Splunk Cloud.
 - Python dependencies are vendored into `lib/` at build time from
   `package/lib/requirements.txt` (`splunktaucclib`, `splunk-sdk`, `solnlib`,
-  `nats-py`). Supported Splunk Python runtimes: 3.9 and 3.13.
+  `nats-py`, `ecdsa`). NKey signing uses the pure-Python `ecdsa` package rather
+  than `nkeys`/PyNaCl, whose native libraries would make the add-on
+  platform-specific. Supported Splunk Python runtimes: 3.9 and 3.13.
 
 ## Building
 
@@ -256,8 +280,10 @@ package under `output/`.
 ## Testing
 
 - `tests/unit` (pytest) runs the add-on code from `package/bin` against the
-  dependencies in `tests/requirements.txt`. The KV tests start a throwaway
-  `nats-server` with JetStream, so put `nats-server` on `PATH` (they skip without it).
+  dependencies in `tests/requirements.txt`. The KV and connection tests start
+  throwaway `nats-server` processes, so put `nats-server` on `PATH` (the connection
+  tests also accept `NATS_SERVER_BIN`); the connection tests need `openssl` to
+  create a test CA. They skip without `nats-server`, except in CI where they fail.
 - `tests/package` (stdlib unittest) imports every module of the built add-on in
   `output/nats` with its vendored `lib/`, so build first and run it on each
   supported runtime: `python3.9 -m unittest discover -s tests/package` (and 3.13).

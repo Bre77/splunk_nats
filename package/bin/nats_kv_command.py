@@ -21,10 +21,8 @@ import sys
 # Add the lib directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
+import nats_connection
 from nats.errors import Error as NatsError
-from solnlib import conf_manager
-
-import nats
 from nats_kv_common import (
     entry_operation,
     entry_raw,
@@ -41,7 +39,13 @@ SOURCETYPE = "nats:kv"
 # Errors that are about the user's input or environment, not a bug in this
 # command. They are reported as a single clean message; anything else is left
 # to propagate so splunklib names the file and line where it really happened.
-USER_ERRORS = (ValueError, OSError, asyncio.TimeoutError, NatsError)
+USER_ERRORS = (
+    ValueError,
+    OSError,
+    asyncio.TimeoutError,
+    NatsError,
+    nats_connection.NatsConnectError,
+)
 
 
 def generate(command_instance):
@@ -88,8 +92,6 @@ def generate(command_instance):
 
         # Get account configuration
         account_config = _get_account_config(command_instance, account)
-        if not account_config:
-            raise ValueError(f"Account configuration '{account}' not found or invalid")
 
         events = asyncio.run(
             _get_kv_history(bucket, key, account_config, logger, domain)
@@ -120,25 +122,14 @@ async def _get_kv_history(bucket, key, account_config, logger=None, domain=None)
     Returns:
         List of event dictionaries for Splunk
     """
-    nc = None
+    connection = None
     events = []
     try:
-        # Connection options
-        connect_options = {}
-
-        # Get server URLs (comma-separated)
-        servers = account_config.get("servers", "nats://localhost:4222")
-        server_list = [server.strip() for server in servers.split(",")]
-
-        if account_config.get("username") and account_config.get("password"):
-            connect_options["user"] = account_config["username"]
-            connect_options["password"] = account_config["password"]
-
-        # Set connection timeout
-        connect_options["connect_timeout"] = account_config.get("connect_timeout", 30)
-
-        # Connect to NATS
-        nc = await nats.connect(servers=server_list, **connect_options)
+        # Connect to NATS: one bounded attempt that fails with the real cause
+        connection = await nats_connection.connect(
+            account_config, name="splunk-nats natskv"
+        )
+        nc = connection.nc
 
         # Get the connected server URL for the host field
         connected_host = "unknown"
@@ -168,73 +159,35 @@ async def _get_kv_history(bucket, key, account_config, logger=None, domain=None)
             logger.error("NATS connection error: %s", str(e))
         raise
     finally:
-        if nc:
-            try:
-                await nc.close()
-            except Exception:
-                pass
+        if connection:
+            await connection.close()
 
     return events
 
 
 def _get_account_config(command_instance, account_name):
     """
-    Retrieve account configuration from Splunk configuration using UCC patterns.
+    Retrieve account configuration (with decrypted secrets) for the command.
 
     Args:
         command_instance: The command instance
         account_name: Name of the account configuration
 
     Returns:
-        Dictionary containing account configuration or None if not found
+        Dictionary containing the account configuration
+
+    Raises:
+        NatsConnectError: If the account does not exist or cannot be read
     """
-    try:
-        # Ensure account_name is a string
-        if not isinstance(account_name, str):
-            account_name = str(account_name)
+    # Get session key from command instance
+    session_key = getattr(command_instance, "session_key", None)
+    if not session_key:
+        # Try to get from service
+        service = getattr(command_instance, "service", None)
+        if service:
+            session_key = service.token
 
-        # Get session key from command instance
-        session_key = getattr(command_instance, "session_key", None)
-        if not session_key:
-            # Try to get from service
-            service = getattr(command_instance, "service", None)
-            if service:
-                session_key = service.token
+    if not session_key:
+        raise RuntimeError("Unable to get session key for configuration access")
 
-        if not session_key:
-            raise Exception("Unable to get session key for configuration access")
-
-        # Use UCC configuration manager to get account details
-        try:
-            cfm = conf_manager.ConfManager(
-                session_key,
-                "nats",
-                realm="__REST_CREDENTIAL__#nats#configs/conf-nats_account",
-            )
-
-            account_conf_file = cfm.get_conf("nats_account")
-            account_config = account_conf_file.get(account_name)
-        except Exception as e:
-            raise Exception(
-                f"Failed to access configuration manager for account '{account_name}': {str(e)}"
-            )
-
-        if not account_config:
-            return None
-
-        # Convert account_config to dict and handle any special conversions
-        config = dict(account_config)
-
-        # Convert connect_timeout to int if it exists and is not already an int
-        if "connect_timeout" in config and config["connect_timeout"] is not None:
-            try:
-                config["connect_timeout"] = int(config["connect_timeout"])
-            except (ValueError, TypeError):
-                config["connect_timeout"] = 30  # Default timeout
-
-        return config
-
-    except Exception as e:
-        raise ValueError(
-            f"Failed to get account configuration '{account_name}': {str(e)}"
-        )
+    return nats_connection.load_account(session_key, str(account_name))

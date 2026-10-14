@@ -92,10 +92,194 @@
                                     "maxLength": 200
                                 }
                             ]
+                        },
+                        {
+                            "type": "text",
+                            "label": "Token",
+                            "field": "token",
+                            "help": "Token for NATS token authentication",
+                            "required": false,
+                            "encrypted": true,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "Token should be at most 1000 characters",
+                                    "minLength": 0,
+                                    "maxLength": 1000
+                                }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "label": "NKey Seed",
+                            "field": "nkey_seed",
+                            "help": "NKey user seed (starts with SU) for NKey authentication. Do not combine with a credentials file.",
+                            "required": false,
+                            "encrypted": true,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "NKey Seed should be at most 200 characters",
+                                    "minLength": 0,
+                                    "maxLength": 200
+                                }
+                            ]
+                        },
+                        {
+                            "type": "textarea",
+                            "label": "Credentials File",
+                            "field": "credentials",
+                            "help": "Full content of a NATS .creds file (user JWT and NKey seed) for decentralized JWT authentication",
+                            "required": false,
+                            "encrypted": true,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "Credentials File should be at most 20000 characters",
+                                    "minLength": 0,
+                                    "maxLength": 20000
+                                }
+                            ],
+                            "options": {
+                                "rowsMin": 3,
+                                "rowsMax": 10
+                            }
+                        },
+                        {
+                            "type": "textarea",
+                            "label": "TLS CA Certificates",
+                            "field": "tls_ca",
+                            "help": "PEM CA certificates used to verify the server. Leave empty to use the system trust store.",
+                            "required": false,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "TLS CA Certificates should be at most 100000 characters",
+                                    "minLength": 0,
+                                    "maxLength": 100000
+                                }
+                            ],
+                            "options": {
+                                "rowsMin": 3,
+                                "rowsMax": 10
+                            }
+                        },
+                        {
+                            "type": "textarea",
+                            "label": "TLS Client Certificate",
+                            "field": "tls_cert",
+                            "help": "PEM client certificate for mutual TLS",
+                            "required": false,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "TLS Client Certificate should be at most 20000 characters",
+                                    "minLength": 0,
+                                    "maxLength": 20000
+                                }
+                            ],
+                            "options": {
+                                "rowsMin": 3,
+                                "rowsMax": 10
+                            }
+                        },
+                        {
+                            "type": "textarea",
+                            "label": "TLS Client Key",
+                            "field": "tls_key",
+                            "help": "PEM private key (unencrypted) for the client certificate",
+                            "required": false,
+                            "encrypted": true,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "errorMsg": "TLS Client Key should be at most 20000 characters",
+                                    "minLength": 0,
+                                    "maxLength": 20000
+                                }
+                            ],
+                            "options": {
+                                "rowsMin": 3,
+                                "rowsMax": 10
+                            }
+                        },
+                        {
+                            "type": "checkbox",
+                            "label": "Verify Server Certificate",
+                            "field": "tls_verify",
+                            "help": "Verify the server's TLS certificate and host name. Only turn this off for testing.",
+                            "required": false,
+                            "defaultValue": true
+                        },
+                        {
+                            "type": "checkbox",
+                            "label": "TLS Handshake First",
+                            "field": "tls_handshake_first",
+                            "help": "Start TLS before the NATS protocol handshake (for servers configured with handshake_first)",
+                            "required": false,
+                            "defaultValue": false
+                        },
+                        {
+                            "type": "text",
+                            "label": "Connect Timeout",
+                            "field": "connect_timeout",
+                            "help": "Seconds to wait for a connection to each server. The account is test-connected when saved.",
+                            "required": false,
+                            "validators": [
+                                {
+                                    "type": "number",
+                                    "errorMsg": "Connect timeout must be a number of seconds between 1 and 300",
+                                    "range": [
+                                        1,
+                                        300
+                                    ]
+                                }
+                            ],
+                            "defaultValue": "10"
                         }
                     ],
                     "title": "Accounts",
-                    "formTitle": "Account"
+                    "formTitle": "Account",
+                    "groups": [
+                        {
+                            "label": "Token, NKey and Credentials File",
+                            "options": {
+                                "isExpandable": true,
+                                "expand": false
+                            },
+                            "fields": [
+                                "token",
+                                "nkey_seed",
+                                "credentials"
+                            ]
+                        },
+                        {
+                            "label": "TLS",
+                            "options": {
+                                "isExpandable": true,
+                                "expand": false
+                            },
+                            "fields": [
+                                "tls_ca",
+                                "tls_cert",
+                                "tls_key",
+                                "tls_verify",
+                                "tls_handshake_first"
+                            ]
+                        },
+                        {
+                            "label": "Advanced",
+                            "options": {
+                                "isExpandable": true,
+                                "expand": false
+                            },
+                            "fields": [
+                                "connect_timeout"
+                            ]
+                        }
+                    ],
+                    "restHandlerModule": "nats_rh_account_handler",
+                    "restHandlerClass": "NatsAccountHandler"
                 },
                 {
                     "type": "loggingTab"

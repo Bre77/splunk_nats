@@ -44,16 +44,15 @@ import asyncio
 import json
 import logging
 import os
-import signal
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 # Add the lib directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 # Import Splunk libraries
-from solnlib import conf_manager
+import nats_connection
 from solnlib import splunk_rest_client
 from solnlib.modular_input import checkpointer
 from splunklib import modularinput as smi
@@ -125,9 +124,7 @@ def validate_input(definition: smi.ValidationDefinition) -> None:
         # Try to get account configuration to validate it exists
         session_key = definition.metadata.get("session_key")
         if session_key:
-            account_config = _get_account_config(session_key, account)
-            if not account_config:
-                raise ValueError(f"Account '{account}' not found or invalid")
+            nats_connection.load_account(session_key, account)
 
     except Exception as e:
         raise Exception(f"Input validation failed: {str(e)}")
@@ -155,24 +152,24 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             if not session_key:
                 raise Exception("Unable to get session key for configuration access")
 
-            # Get account configuration
-            account_config = _get_account_config(session_key, account)
-            if not account_config:
-                raise Exception(f"Account configuration '{account}' not found")
-
             checkpoint = _open_checkpoint(session_key, input_name, bucket, domain)
 
-            # Monitor NATS JetStream KV bucket until Splunk stops the input
-            _run_until_stopped(
-                _monitor_kv_bucket(
+            # Monitor NATS JetStream KV bucket until Splunk stops the input,
+            # reconnecting forever. The account is reloaded before every connection
+            # attempt so corrected settings are picked up.
+            nats_connection.run_input(
+                input_name,
+                lambda: nats_connection.load_account(session_key, account),
+                lambda connection: _monitor_kv_bucket(
+                    connection=connection,
                     bucket=bucket,
                     subject=subject,
-                    account_config=account_config,
                     sourcetype=sourcetype,
                     event_writer=event_writer,
                     checkpoint=checkpoint,
                     domain=domain,
-                )
+                ),
+                log=logger,
             )
 
         except Exception as e:
@@ -312,36 +309,10 @@ def _kvstore_status(session_key: str) -> str:
     return content["current"]["status"]
 
 
-def _run_until_stopped(coro: Any) -> None:
-    """
-    Run the monitor coroutine, cancelling it when Splunk sends SIGTERM (input
-    disabled, or Splunk stopping) so its cleanup saves the checkpoint.
-    """
-
-    async def main() -> bool:
-        task = asyncio.ensure_future(coro)
-        try:
-            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
-        except (NotImplementedError, RuntimeError):
-            # Signal handlers are not available on Windows event loops
-            pass
-        try:
-            await task
-        except asyncio.CancelledError:
-            return True
-        return False
-
-    if asyncio.run(main()):
-        logger.info("NATS KV input stopped")
-        # Splunk closes the event pipe when it stops an input, so exit now
-        # instead of letting splunklib write the closing </stream> tag into it.
-        sys.exit(0)
-
-
 async def _monitor_kv_bucket(
+    connection: nats_connection.Connection,
     bucket: str,
     subject: str,
-    account_config: Dict[str, Any],
     sourcetype: str,
     event_writer: smi.EventWriter,
     checkpoint: Checkpoint,
@@ -349,33 +320,23 @@ async def _monitor_kv_bucket(
 ) -> None:
     """
     Write every change in a NATS JetStream KV bucket as an event, starting after
-    the checkpointed revision, until cancelled.
+    the checkpointed revision, until cancelled or the connection fails.
 
     Args:
+        connection: Connected NATS connection
         bucket: KV bucket name
         subject: Key filter to watch (NATS wildcards allowed)
-        account_config: Account configuration dictionary
         sourcetype: Sourcetype for events
         event_writer: EventWriter for outputting events
         checkpoint: Checkpoint holding the last processed revision
         domain: Optional JetStream domain
     """
-    nc = None
+    nc = connection.nc
+
+    # Events an earlier session held were never written, so read them again.
+    checkpoint.revision = checkpoint.saved_revision
+
     try:
-        # Connection options
-        connect_options = {}
-
-        # Get server URLs (comma-separated)
-        servers = account_config.get("servers", "nats://localhost:4222")
-        server_list = [server.strip() for server in servers.split(",")]
-
-        if account_config.get("username") and account_config.get("password"):
-            connect_options["user"] = account_config["username"]
-            connect_options["password"] = account_config["password"]
-
-        # Connect to NATS
-        nc = await nats.connect(servers=server_list, **connect_options)
-
         # Get JetStream context and KV bucket
         js = nc.jetstream(domain=domain)
         kv = await js.key_value(bucket)
@@ -455,19 +416,16 @@ async def _monitor_kv_bucket(
                 )
                 _write_batch(batch, checkpoint, event_writer)
 
+    except nats_connection.InputStopped:
+        raise
     except Exception as e:
-        logger.error(
-            f"Failed to monitor KV bucket '{bucket}' with pattern '{subject}': "
-            f"{kv_error_message(e, bucket, domain, 'the Domain field')}"
-        )
-
-    finally:
         # Events still held were not checkpointed, so they are read again next time
-        if nc:
-            try:
-                await nc.close()
-            except Exception:
-                pass
+        detail = kv_error_message(e, bucket, domain, "the Domain field")
+        if detail == str(e):
+            detail = nats_connection.describe_error(e, connection.servers)
+        raise nats_connection.NatsConnectError(
+            f"Failed to monitor KV bucket '{bucket}' with pattern '{subject}': {detail}"
+        )
 
 
 def _write_batch(
@@ -484,47 +442,12 @@ def _write_batch(
     try:
         for event in batch:
             event_writer.write_event(event)
-    except Exception:
+    except Exception as e:
         # Revision 0 means "nothing written yet", so the bucket is read in full
         checkpoint.revision = previous if previous is not None else 0
         checkpoint.save()
-        raise
+        raise nats_connection.InputStopped(f"Splunk stopped reading events: {e}") from e
     batch.clear()
-
-
-def _get_account_config(
-    session_key: str, account_name: str
-) -> Optional[Dict[str, Any]]:
-    """
-    Retrieve account configuration from Splunk configuration using UCC patterns.
-
-    Args:
-        session_key: Splunk session key
-        account_name: Name of the account configuration
-
-    Returns:
-        Dictionary containing account configuration or None if not found
-    """
-    try:
-        # Use UCC configuration manager to get account details
-        cfm = conf_manager.ConfManager(
-            session_key,
-            "nats",
-            realm="__REST_CREDENTIAL__#nats#configs/conf-nats_account",
-        )
-
-        account_conf_file = cfm.get_conf("nats_account")
-        account_config = account_conf_file.get(account_name)
-
-        if not account_config:
-            return None
-
-        return dict(account_config)
-
-    except Exception as e:
-        raise Exception(
-            f"Failed to get account configuration '{account_name}': {str(e)}"
-        )
 
 
 def _get_checkpointer_key_name(input_name: str) -> str:
