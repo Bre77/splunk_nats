@@ -8,6 +8,7 @@ from nats.js.api import KeyValueConfig
 
 import nats_connection
 import nats_kv_helper
+import nats_logging
 from nats_kv_helper import Checkpoint, _monitor_kv_bucket
 
 BUCKET = "cfg"
@@ -57,6 +58,7 @@ class Monitor:
         self, url, store, subject=">", domain=DOMAIN, bucket=BUCKET, checkpoint=None
     ):
         self.writer = FakeWriter()
+        self.ingestion = nats_logging.Ingestion("nats_kv://kvcfg", "nats", "acct")
         if checkpoint is None:
             checkpoint = Checkpoint(store, "kvcfg", bucket, domain)
             checkpoint.load()
@@ -76,6 +78,8 @@ class Monitor:
                 event_writer=self.writer,
                 checkpoint=self.checkpoint,
                 domain=domain,
+                input_name="nats_kv://kvcfg",
+                ingestion=self.ingestion,
             )
         finally:
             await connection.close()
@@ -112,10 +116,17 @@ def test_first_run_indexes_bucket_with_entry_times_and_checkpoints_after_snapsho
 
         history = {e.key: e for k in ("a", "b") for e in await kv.history(k)}
         events = monitor.writer.events
-        assert [e.source for e in events] == ["cfg.a", "cfg.b"]
+        # The source is the input name, then the subject (moved to nats_subject
+        # at index time).
+        assert [e.source for e in events] == [
+            "nats_kv://kvcfg $KV.cfg.a",
+            "nats_kv://kvcfg $KV.cfg.b",
+        ]
         assert monitor.raws == ['{"v": 1}', "//4="]
+        # Written events are counted for the Monitoring Dashboard
+        assert monitor.ingestion._counts == {"nats:kv": 2}
         for event in events:
-            key = event.source.split(".", 1)[1]
+            key = event.source.rsplit(".", 1)[1]
             # Regression: _time must be the entry created time as epoch seconds
             assert event.time == history[key].created.timestamp()
             assert event.sourceType == "nats:kv"
@@ -172,7 +183,11 @@ def test_deletes_and_purges_are_indexed_with_their_operation(nats_server):
             {"key": "a", "operation": "DEL", "revision": 2},
             {"key": "b", "operation": "PURGE", "revision": 4},
         ]
-        assert [e.source for e in monitor.writer.events] == ["cfg.a", "cfg.a", "cfg.b"]
+        assert [e.source.rsplit(" ", 1)[1] for e in monitor.writer.events] == [
+            "$KV.cfg.a",
+            "$KV.cfg.a",
+            "$KV.cfg.b",
+        ]
         await nc.close()
 
     run(scenario())

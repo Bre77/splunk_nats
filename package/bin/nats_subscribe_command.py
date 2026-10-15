@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import base64
 
 import nats_connection
+import nats_logging
 from nats.aio.msg import Msg
 from nats.errors import Error as NatsError
 from nats_decoder import (
@@ -74,7 +75,9 @@ def generate(command_instance: Any) -> Generator[Dict[str, Any], None, None]:
     Yields:
         Dict: Event dictionaries for Splunk
     """
-    logger = getattr(command_instance, "logger", None)
+    logger = nats_logging.setup_command(
+        "natssubscribe", _session_key(command_instance), _splunklib_logger(command_instance)
+    )
     try:
         subject: Optional[str] = getattr(command_instance, "subject", None)
         account: Optional[str] = getattr(command_instance, "account", None)
@@ -90,15 +93,14 @@ def generate(command_instance: Any) -> Generator[Dict[str, Any], None, None]:
         if not account:
             raise ValueError("Account parameter is required")
 
-        if logger:
-            logger.info(
-                "NATS subscribe command starting: subject='%s', account='%s', "
-                "count=%s, duration=%s",
-                subject,
-                account,
-                count,
-                duration,
-            )
+        logger.info(
+            "NATS subscribe command starting: subject='%s', account='%s', "
+            "count=%s, duration=%s",
+            subject,
+            account,
+            count,
+            duration,
+        )
 
         account_config = _get_account_config(command_instance, account)
 
@@ -106,11 +108,13 @@ def generate(command_instance: Any) -> Generator[Dict[str, Any], None, None]:
             _collect_messages(subject, account_config, count, duration, logger, decoder)
         )
     except USER_ERRORS as e:
-        if logger:
-            logger.error("natssubscribe failed: %s", e)
+        nats_connection.log_failure(logger, e, "natssubscribe failed")
         # Writes one ERROR message and exits; no generic re-raise location.
         command_instance.error_exit(e, str(e))
         return
+    except Exception as e:
+        nats_connection.log_failure(logger, e, "natssubscribe failed")
+        raise
 
     yield from events
 
@@ -147,7 +151,8 @@ def message_to_event(msg: Msg, host: str) -> Dict[str, Any]:
     Convert a NATS message to a Splunk result.
 
     The fields match what the nats_subscribe input indexes (sourcetype, host,
-    source), and every NATS header is added as a `headers.<name>` field.
+    and the subject as nats_subject), and every NATS header is added as a
+    `headers.<name>` field.
     """
     if msg.data:
         try:
@@ -164,6 +169,7 @@ def message_to_event(msg: Msg, host: str) -> Dict[str, Any]:
         "sourcetype": SOURCETYPE,
         "host": host,
         "subject": msg.subject,
+        "nats_subject": msg.subject,
     }
     for name, value in (msg.headers or {}).items():
         event[f"headers.{name}"] = value
@@ -280,15 +286,24 @@ def _get_account_config(command_instance, account_name):
     Raises:
         NatsConnectError: If the account does not exist or cannot be read
     """
-    # Get session key from command instance
-    session_key = getattr(command_instance, "session_key", None)
-    if not session_key:
-        # Try to get from service
-        service = getattr(command_instance, "service", None)
-        if service:
-            session_key = service.token
-
+    session_key = _session_key(command_instance)
     if not session_key:
         raise RuntimeError("Unable to get session key for configuration access")
 
     return nats_connection.load_account(session_key, str(account_name))
+
+
+def _splunklib_logger(command_instance) -> Optional[str]:
+    """The name of the command's own splunklib logger, if it has one."""
+    command_logger = getattr(command_instance, "logger", None)
+    return getattr(command_logger, "name", None)
+
+
+def _session_key(command_instance) -> Optional[str]:
+    """The search's session key, for reading the add-on's configuration."""
+    session_key = getattr(command_instance, "session_key", None)
+    if not session_key:
+        service = getattr(command_instance, "service", None)
+        if service:
+            session_key = service.token
+    return session_key

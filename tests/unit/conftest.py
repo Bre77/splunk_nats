@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import socket
@@ -17,6 +18,26 @@ sys.path.insert(
 sys.path.insert(0, os.path.dirname(__file__))
 
 import natsutil  # noqa: E402
+from solnlib import log  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def addon_log_dir(tmp_path, monkeypatch):
+    """
+    Inputs and commands log to files in $SPLUNK_HOME/var/log/splunk and route the
+    root logger there; keep the files in tmp_path and undo the root logger setup.
+    """
+    log_dir = tmp_path / "log"
+    log_dir.mkdir()
+    monkeypatch.setattr(log.Logs, "_default_directory", str(log_dir))
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    yield log_dir
+    for handler in root.handlers[:]:
+        if handler not in handlers:
+            root.removeHandler(handler)
+            handler.close()
+    root.setLevel(level)
 
 
 def _free_port() -> int:

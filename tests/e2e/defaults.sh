@@ -120,14 +120,14 @@ nats_cli pub demo.json -H traceparent:00-e2e-01 \
 nats_cli pub demo.text "$(printf 'line one 2019-05-05 10:00:00\nline two')"
 sleep 10
 
-sid="$(job 'search index=nats source=demo.* | eval lag=abs(_indextime-_time) | table source sourcetype host linecount lag a')"
+sid="$(job 'search index=nats nats_subject=demo.* | eval lag=abs(_indextime-_time) | table nats_subject sourcetype host linecount lag a')"
 results="$(job_results "$sid")"
 check "input indexed both messages" 'length == 2' "$results"
 check "input sourcetype is nats:message" 'all(.[]; .sourcetype == "nats:message")' "$results"
 check "input host is the NATS server host:port" "all(.[]; .host == \"$nats_name:4222\")" "$results"
-check "multi-line payload stays one event" 'map(select(.source == "demo.json"))[0].linecount == "4"' "$results"
+check "multi-line payload stays one event" 'map(select(.nats_subject == "demo.json"))[0].linecount == "4"' "$results"
 check "_time is the receive time, not a payload timestamp" 'all(.[]; (.lag | tonumber) < 60)' "$results"
-check "JSON payload fields extract" 'map(select(.source == "demo.json"))[0].a == "1"' "$results"
+check "JSON payload fields extract" 'map(select(.nats_subject == "demo.json"))[0].a == "1"' "$results"
 
 # natssubscribe: count= returns early, results match the input's fields and
 # carry headers.

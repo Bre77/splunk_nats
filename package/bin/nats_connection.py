@@ -40,11 +40,12 @@ import ssl
 import sys
 import tempfile
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 # Add the lib directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
+import nats_logging
 import nats_nkeys
 from nats.aio.client import Client, RawCredentials
 from nats import errors as nats_errors
@@ -81,6 +82,10 @@ class NatsConnectError(Exception):
     """A NATS connection or session failure, with a message stating the real cause."""
 
 
+class AccountConfigError(NatsConnectError):
+    """The Account is missing or its settings are invalid."""
+
+
 class InputStopped(Exception):
     """Raised by a session when Splunk no longer reads the input's events, so the
     input must stop rather than reconnect."""
@@ -106,11 +111,11 @@ def connect_timeout(account: Dict[str, Any]) -> float:
     try:
         timeout = float(value)
     except (TypeError, ValueError):
-        raise NatsConnectError(
+        raise AccountConfigError(
             f"Connect timeout must be a number of seconds, got '{value}'"
         )
     if not 0 < timeout <= MAX_CONNECT_TIMEOUT:
-        raise NatsConnectError(
+        raise AccountConfigError(
             f"Connect timeout must be between 1 and {MAX_CONNECT_TIMEOUT} seconds"
         )
     return timeout
@@ -132,7 +137,7 @@ def normalize_pem(text: str, what: str) -> str:
         lines = [data[i : i + 64] for i in range(0, len(data), 64)]
         blocks.append("\n".join([f"-----BEGIN {label}-----", *lines, f"-----END {label}-----"]))
     if not blocks:
-        raise NatsConnectError(f"{what} must be PEM text (-----BEGIN ...-----)")
+        raise AccountConfigError(f"{what} must be PEM text (-----BEGIN ...-----)")
     return "\n".join(blocks) + "\n"
 
 
@@ -141,14 +146,14 @@ def normalize_credentials(text: str) -> str:
     jwt = _CREDS_JWT.search(text)
     seed = _CREDS_SEED.search(text)
     if not jwt or not seed:
-        raise NatsConnectError(
+        raise AccountConfigError(
             "Credentials must be the full content of a NATS .creds file "
             "(user JWT and NKey seed)"
         )
     try:
         nats_nkeys.decode_seed(seed.group(1))
     except nats_nkeys.ErrInvalidSeed:
-        raise NatsConnectError("Credentials file does not contain a valid NKey seed")
+        raise AccountConfigError("Credentials file does not contain a valid NKey seed")
     return (
         "-----BEGIN NATS USER JWT-----\n"
         f"{jwt.group(1)}\n"
@@ -174,7 +179,7 @@ def build_tls_context(account: Dict[str, Any]) -> Optional[ssl.SSLContext]:
         return None
 
     if bool(cert) != bool(key):
-        raise NatsConnectError(
+        raise AccountConfigError(
             "TLS client certificate and client key must be provided together"
         )
 
@@ -187,7 +192,7 @@ def build_tls_context(account: Dict[str, Any]) -> Optional[ssl.SSLContext]:
     try:
         context = ssl.create_default_context(cadata=ca or None)
     except ssl.SSLError as e:
-        raise NatsConnectError(f"Invalid TLS CA bundle: {e}")
+        raise AccountConfigError(f"Invalid TLS CA bundle: {e}")
 
     if not verify:
         context.check_hostname = False
@@ -206,7 +211,7 @@ def build_tls_context(account: Dict[str, Any]) -> Optional[ssl.SSLContext]:
                     f.write(content)
             context.load_cert_chain(cert_path, key_path)
         except ssl.SSLError as e:
-            raise NatsConnectError(f"Invalid TLS client certificate or key: {e}")
+            raise AccountConfigError(f"Invalid TLS client certificate or key: {e}")
         finally:
             shutil.rmtree(directory, ignore_errors=True)
 
@@ -233,7 +238,7 @@ def build_connect_options(account: Dict[str, Any]) -> Dict[str, Any]:
     credentials = (account.get("credentials") or "").strip()
     nkey_seed = (account.get("nkey_seed") or "").strip()
     if credentials and nkey_seed:
-        raise NatsConnectError(
+        raise AccountConfigError(
             "Set either a credentials file or an NKey seed, not both"
         )
     if credentials:
@@ -242,7 +247,7 @@ def build_connect_options(account: Dict[str, Any]) -> Dict[str, Any]:
         try:
             nats_nkeys.decode_seed(nkey_seed)
         except nats_nkeys.ErrInvalidSeed:
-            raise NatsConnectError("NKey seed is not a valid NATS NKey seed (SU...)")
+            raise AccountConfigError("NKey seed is not a valid NATS NKey seed (SU...)")
         options["nkeys_seed_str"] = nkey_seed
 
     tls_context = build_tls_context(account)
@@ -331,6 +336,56 @@ def describe_error(
 
 def is_permissions_violation(error: BaseException) -> bool:
     return "permissions violation" in str(error).lower()
+
+
+CONNECTION_ERRORS = (
+    OSError,
+    asyncio.TimeoutError,
+    nats_errors.TimeoutError,
+    nats_errors.NoServersError,
+    nats_errors.UnexpectedEOF,
+    nats_errors.ConnectionClosedError,
+    nats_errors.StaleConnectionError,
+)
+
+
+UNEXPECTED_ERROR = "Unexpected Error"
+
+
+def error_label(error: BaseException) -> str:
+    """The error type the Monitoring Dashboard groups a failure by (its exc_l)."""
+    message = describe_error(error)
+    if message.startswith("Authorization violation"):
+        return "Authentication Error"
+    if message.startswith("Permissions violation"):
+        return "Permission Error"
+    if isinstance(error, (AccountConfigError, ValueError)):
+        return "Configuration Error"
+    if isinstance(error, NatsConnectError):
+        cause = error.__cause__
+        return error_label(cause) if cause is not None else "Connection Error"
+    if isinstance(error, CONNECTION_ERRORS):
+        return "Connection Error"
+    if isinstance(error, nats_errors.Error):
+        return "NATS Error"
+    return UNEXPECTED_ERROR
+
+
+def log_failure(log: logging.Logger, error: BaseException, message: str, *args) -> None:
+    """
+    Log a failure as one labelled ERROR line, `<message>: <real cause>`. An
+    unexpected error (a bug) also gets its traceback, on the same line.
+    """
+    label = error_label(error)
+    nats_logging.log_error(
+        log,
+        label,
+        message + ": %s",
+        *args,
+        describe_error(error),
+        exc_info=error if label == UNEXPECTED_ERROR else None,
+        stacklevel=3,
+    )
 
 
 class Connection:
@@ -511,16 +566,17 @@ async def run_forever(
     backoff = backoff or Backoff()
     failing_since: Optional[float] = None
     last_reason: Optional[str] = None
+    # Why the last session failed while connected, until a session runs stably
+    last_session_error: Optional[str] = None
     ever_connected = False
 
     while not stop.is_set():
         try:
             account = load_account()
             connection = await connect(account, name=f"splunk-nats {input_name}")
-        except NatsConnectError as e:
-            reason = str(e)
         except Exception as e:
             reason = describe_error(e)
+            label = error_label(e)
         else:
             if ever_connected:
                 outage = time.monotonic() - failing_since if failing_since else 0.0
@@ -534,22 +590,29 @@ async def run_forever(
             last_reason = None
 
             connected_at = time.monotonic()
-            reason = await _run_session(connection, session, stop)
+            reason, error = await _run_session(connection, session, stop)
             if stop.is_set():
                 if reason != "stopped":
                     log.info("%s: stopping: %s", input_name, reason)
                 break
             if time.monotonic() - connected_at >= RECONNECT_STABLE_AFTER:
                 backoff.reset()
+                last_session_error = None
             failing_since = time.monotonic()
             delay = backoff.next()
-            log.warning(
-                "%s: disconnected from %s: %s; reconnecting in %.1fs",
-                input_name,
-                connection.url,
-                reason,
-                delay,
-            )
+            message = "%s: disconnected from %s: %s; reconnecting in %.1fs"
+            args = (input_name, connection.url, reason, delay)
+            if error is None:
+                # The connection was lost: reconnecting is the remedy.
+                log.warning(message, *args)
+            elif reason != last_session_error:
+                # The session failed on a live connection (e.g. a permissions
+                # violation or a missing bucket): an error the user must fix.
+                nats_logging.log_error(log, error_label(error), message, *args)
+            else:
+                log.debug(message, *args)
+            if error is not None:
+                last_session_error = reason
             last_reason = reason
             await _sleep_unless_stopped(stop, delay)
             continue
@@ -558,7 +621,9 @@ async def run_forever(
             failing_since = time.monotonic()
         delay = backoff.next()
         if reason != last_reason:
-            log.error(
+            nats_logging.log_error(
+                log,
+                label,
                 "%s: cannot connect to NATS: %s; retrying in %.1fs and will keep retrying",
                 input_name,
                 reason,
@@ -572,8 +637,14 @@ async def run_forever(
     log.info("%s: stopped", input_name)
 
 
-async def _run_session(connection: Connection, session: Session, stop: asyncio.Event) -> str:
-    """Run one session until the connection closes; return why it ended."""
+async def _run_session(
+    connection: Connection, session: Session, stop: asyncio.Event
+) -> Tuple[str, Optional[BaseException]]:
+    """
+    Run one session until the connection closes. Returns why it ended, and the
+    error when the session failed on a live connection rather than because the
+    connection closed or the input stopped.
+    """
     session_task = asyncio.ensure_future(session(connection))
     waiters = [
         session_task,
@@ -582,6 +653,7 @@ async def _run_session(connection: Connection, session: Session, stop: asyncio.E
         asyncio.ensure_future(stop.wait()),
     ]
     reason = "stopped"
+    failure: Optional[BaseException] = None
     try:
         pending = set(waiters)
         while True:
@@ -599,9 +671,11 @@ async def _run_session(connection: Connection, session: Session, stop: asyncio.E
                         reason = connection.close_reason()
                     else:
                         reason = describe_error(error, connection.servers)
+                        failure = error
                     break
             if connection.fatal.is_set():
                 reason = describe_error(connection.fatal_error, connection.servers)
+                failure = connection.fatal_error
                 break
             if connection.closed.is_set():
                 reason = connection.close_reason()
@@ -615,7 +689,7 @@ async def _run_session(connection: Connection, session: Session, stop: asyncio.E
                 waiter.cancel()
         await asyncio.gather(*waiters, return_exceptions=True)
         await connection.close()
-    return reason
+    return reason, failure
 
 
 async def _sleep_unless_stopped(stop: asyncio.Event, delay: float) -> None:
@@ -631,10 +705,14 @@ def run_input(
     session: Session,
     log: logging.Logger = logger,
     cleanup: Optional[Callable[[], Awaitable[None]]] = None,
+    housekeeping: Optional[Callable[[asyncio.Event], Awaitable[None]]] = None,
 ) -> None:
     """
     Run an input until Splunk stops it with SIGTERM (input disabled, or Splunk
     stopping), then close the connection, await `cleanup` and exit.
+
+    `housekeeping` runs alongside the input until it stops, and is given an event
+    that is set when it does.
     """
 
     async def main() -> None:
@@ -646,9 +724,15 @@ def run_input(
             except (NotImplementedError, RuntimeError, ValueError):
                 # Signal handlers are not available on Windows event loops
                 pass
+        background = None
+        if housekeeping is not None:
+            background = asyncio.ensure_future(housekeeping(stop))
         try:
             await run_forever(input_name, load_account, session, log=log, stop=stop)
         finally:
+            stop.set()
+            if background is not None:
+                await asyncio.gather(background, return_exceptions=True)
             if cleanup is not None:
                 await cleanup()
 
@@ -663,7 +747,7 @@ def load_account(session_key: str, account_name: str) -> Dict[str, Any]:
     Read an Account (with decrypted secrets) from the add-on's configuration.
 
     Raises:
-        NatsConnectError: If the Account does not exist or cannot be read.
+        AccountConfigError: If the Account does not exist or cannot be read.
     """
     from solnlib import conf_manager
 
@@ -675,9 +759,9 @@ def load_account(session_key: str, account_name: str) -> Dict[str, Any]:
         )
         account_config = cfm.get_conf("nats_account").get(account_name)
     except Exception as e:
-        raise NatsConnectError(
+        raise AccountConfigError(
             f"Failed to get account configuration '{account_name}': {str(e)}"
         )
     if not account_config:
-        raise NatsConnectError(f"Account configuration '{account_name}' not found")
+        raise AccountConfigError(f"Account configuration '{account_name}' not found")
     return dict(account_config)
