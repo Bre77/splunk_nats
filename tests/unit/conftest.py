@@ -14,6 +14,9 @@ sys.dont_write_bytecode = True
 sys.path.insert(
     0, os.path.join(os.path.dirname(__file__), "..", "..", "package", "bin")
 )
+sys.path.insert(0, os.path.dirname(__file__))
+
+import natsutil  # noqa: E402
 
 
 def _free_port() -> int:
@@ -53,3 +56,23 @@ def nats_server(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+@pytest.fixture
+def start_nats_server(tmp_path):
+    """Start nats-server processes with a given config (and port); stopped at teardown."""
+    if not natsutil.NATS_SERVER:
+        message = "nats-server binary not found (set NATS_SERVER_BIN)"
+        if os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
+    servers = []
+
+    def start(config: str = "", port: int = 0) -> natsutil.NatsServer:
+        server = natsutil.NatsServer(tmp_path, config, port).start()
+        servers.append(server)
+        return server
+
+    yield start
+    for server in servers:
+        server.stop()

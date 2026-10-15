@@ -21,7 +21,6 @@ This module provides the input helper functions for collecting data from NATS to
 UCC will call validate_input() during configuration validation and stream_events() during data collection.
 """
 
-import asyncio
 import logging
 import os
 import sys
@@ -32,11 +31,10 @@ from typing import Any, Dict, Optional
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 # Import Splunk libraries
+import nats_connection
 from nats.aio.msg import Msg
-from solnlib import conf_manager
 from splunklib import modularinput as smi
 
-import nats
 from nats_decoder import (
     DEFAULT_SOURCETYPE,
     BrokenDecoder,
@@ -80,9 +78,7 @@ def validate_input(definition: smi.ValidationDefinition) -> None:
         # Try to get account configuration to validate it exists
         session_key = definition.metadata.get("session_key")
         if session_key:
-            account_config = _get_account_config(session_key, account)
-            if not account_config:
-                raise ValueError(f"Account '{account}' not found or invalid")
+            nats_connection.load_account(session_key, account)
 
     except Exception as e:
         raise Exception(f"Input validation failed: {str(e)}")
@@ -108,23 +104,27 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             if not session_key:
                 raise Exception("Unable to get session key for configuration access")
 
-            # Get account configuration
-            account_config = _get_account_config(session_key, account)
-            if not account_config:
-                raise Exception(f"Account configuration '{account}' not found")
+            # The decoder is started once and kept running across reconnects
+            decoder = _create_decoder(input_item)
+            decoded_sourcetype = (
+                input_item.get("decoded_sourcetype") or DEFAULT_SOURCETYPE
+            )
 
-            # Subscribe to NATS topic
-            asyncio.run(
-                _subscribe_to_nats(
-                    input_name=input_name,
+            # Subscribe to NATS topic, reconnecting forever. The account is reloaded
+            # before every connection attempt so corrected settings are picked up.
+            nats_connection.run_input(
+                input_name,
+                lambda: nats_connection.load_account(session_key, account),
+                lambda connection: _subscribe_to_nats(
+                    connection=connection,
                     subject=subject,
-                    account_config=account_config,
                     sourcetype=sourcetype,
                     event_writer=event_writer,
-                    decoder=_create_decoder(input_item),
-                    decoded_sourcetype=input_item.get("decoded_sourcetype")
-                    or DEFAULT_SOURCETYPE,
-                )
+                    decoder=decoder,
+                    decoded_sourcetype=decoded_sourcetype,
+                ),
+                log=logger,
+                cleanup=decoder.close if decoder is not None else None,
             )
 
         except Exception as e:
@@ -133,46 +133,30 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
 
 
 async def _subscribe_to_nats(
-    input_name: str,
+    connection: nats_connection.Connection,
     subject: str,
-    account_config: Dict[str, Any],
     sourcetype: str,
     event_writer: smi.EventWriter,
     decoder: Optional[Decoder] = None,
     decoded_sourcetype: str = DEFAULT_SOURCETYPE,
 ) -> None:
     """
-    Subscribe to NATS topic and stream messages continuously.
+    Subscribe to a NATS subject on a live connection and write each message as an event.
 
     Args:
-        input_name: Name of the input
+        connection: Connected NATS connection
         subject: NATS subject to subscribe to
-        account_config: Account configuration dictionary
         sourcetype: Sourcetype for events
         event_writer: EventWriter for outputting events
         decoder: Optional payload decoder
         decoded_sourcetype: Sourcetype for decoded events
     """
-    nc = None
+    nc = connection.nc
     decode_errors = (
         DecodeErrorLog(logger.warning, decoder.name) if decoder is not None else None
     )
 
     try:
-        # Connection options
-        connect_options = {}
-
-        # Get server URLs (comma-separated)
-        servers = account_config.get("servers", "nats://localhost:4222")
-        server_list = [server.strip() for server in servers.split(",")]
-
-        if account_config.get("username") and account_config.get("password"):
-            connect_options["user"] = account_config["username"]
-            connect_options["password"] = account_config["password"]
-
-        # Connect to NATS
-        nc = await nats.connect(servers=server_list, **connect_options)
-
         # Message handler that writes events directly
         async def message_handler(msg: Msg):
             try:
@@ -204,31 +188,16 @@ async def _subscribe_to_nats(
                     f"Failed to process NATS message from subject '{msg.subject}': {str(e)}"
                 )
 
-        # Subscribe to the subject
-        sub = await nc.subscribe(subject, cb=message_handler)
-
-        # Run continuously until interrupted
-        try:
-            while True:
-                await asyncio.sleep(3600)  # Sleep in 1-hour chunks to keep alive
-        except asyncio.CancelledError:
-            pass
-        finally:
-            # Unsubscribe when done
-            await sub.unsubscribe()
+        # Subscribe and wait for the server to confirm, so a permissions violation
+        # on the subject is reported now rather than leaving the input silently idle.
+        await nc.subscribe(subject, cb=message_handler)
+        await connection.confirm()
 
     except Exception as e:
-        # Log error instead of writing as event
-        logger.error(f"Failed to subscribe to NATS topic '{subject}': {str(e)}")
-
-    finally:
-        if nc:
-            try:
-                await nc.close()
-            except Exception:
-                pass
-        if decoder is not None:
-            await decoder.close()
+        raise nats_connection.NatsConnectError(
+            f"Failed to subscribe to NATS topic '{subject}': "
+            f"{nats_connection.describe_error(e, connection.servers)}"
+        )
 
 
 def _create_decoder(input_item: Dict[str, Any]) -> Optional[Decoder]:
@@ -249,38 +218,3 @@ def _create_decoder(input_item: Dict[str, Any]) -> Optional[Decoder]:
     except DecodeError as e:
         logger.error(f"{e}; payloads are kept as base64 until it is in place")
     return decoder
-
-
-def _get_account_config(
-    session_key: str, account_name: str
-) -> Optional[Dict[str, Any]]:
-    """
-    Retrieve account configuration from Splunk configuration using UCC patterns.
-
-    Args:
-        session_key: Splunk session key
-        account_name: Name of the account configuration
-
-    Returns:
-        Dictionary containing account configuration or None if not found
-    """
-    try:
-        # Use UCC configuration manager to get account details
-        cfm = conf_manager.ConfManager(
-            session_key,
-            "nats",
-            realm="__REST_CREDENTIAL__#nats#configs/conf-nats_account",
-        )
-
-        account_conf_file = cfm.get_conf("nats_account")
-        account_config = account_conf_file.get(account_name)
-
-        if not account_config:
-            return None
-
-        return dict(account_config)
-
-    except Exception as e:
-        raise Exception(
-            f"Failed to get account configuration '{account_name}': {str(e)}"
-        )

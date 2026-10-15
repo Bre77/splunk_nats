@@ -10,6 +10,7 @@ from nats.aio.msg import Msg
 from nats.errors import NoServersError
 
 import nats_subscribe_command as cmd
+import natsutil
 
 
 class ErrorExit(Exception):
@@ -62,10 +63,7 @@ class FakeNats:
 
 
 def patch_connect(monkeypatch, client):
-    async def connect(**kwargs):
-        return client
-
-    monkeypatch.setattr(cmd.nats, "connect", connect)
+    natsutil.patch_connect(monkeypatch, cmd, client)
 
 
 def collect(subject="telemetry.>", count=100, duration=10, decoder=None):

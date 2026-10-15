@@ -29,11 +29,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 # UCC generates the command wrapper automatically
 import base64
 
+import nats_connection
 from nats.aio.msg import Msg
 from nats.errors import Error as NatsError
-from solnlib import conf_manager
-
-import nats
 from nats_decoder import (
     DEFAULT_SOURCETYPE as DECODED_SOURCETYPE,
     DecodeError,
@@ -53,7 +51,13 @@ DEFAULT_DURATION = 10
 # Errors that are about the user's input or environment, not a bug in this
 # command. They are reported as a single clean message; anything else is left
 # to propagate so splunklib names the file and line where it really happened.
-USER_ERRORS = (ValueError, OSError, asyncio.TimeoutError, NatsError)
+USER_ERRORS = (
+    ValueError,
+    OSError,
+    asyncio.TimeoutError,
+    NatsError,
+    nats_connection.NatsConnectError,
+)
 
 
 def generate(command_instance: Any) -> Generator[Dict[str, Any], None, None]:
@@ -97,8 +101,6 @@ def generate(command_instance: Any) -> Generator[Dict[str, Any], None, None]:
             )
 
         account_config = _get_account_config(command_instance, account)
-        if not account_config:
-            raise ValueError(f"Account configuration '{account}' not found or invalid")
 
         events = asyncio.run(
             _collect_messages(subject, account_config, count, duration, logger, decoder)
@@ -200,23 +202,18 @@ async def _collect_messages(
     Returns:
         List of event dictionaries for Splunk
     """
-    nc = None
+    connection = None
     events: List[Dict[str, Any]] = []
     messages: List[Msg] = []
     enough = asyncio.Event()
 
     try:
-        connect_options: Dict[str, Any] = {}
-
-        servers = account_config.get("servers", "nats://localhost:4222")
-        server_list: List[str] = [server.strip() for server in servers.split(",")]
-
-        if account_config.get("username") and account_config.get("password"):
-            connect_options["user"] = account_config["username"]
-            connect_options["password"] = account_config["password"]
-
-        nc = await nats.connect(servers=server_list, **connect_options)
-        host = connected_host(nc, server_list)
+        # One bounded connection attempt that fails with the real cause
+        connection = await nats_connection.connect(
+            account_config, name="splunk-nats natssubscribe"
+        )
+        nc = connection.nc
+        host = connected_host(nc, connection.servers)
 
         async def message_handler(msg: Msg) -> None:
             if enough.is_set():
@@ -226,11 +223,27 @@ async def _collect_messages(
             if count and len(events) >= count:
                 enough.set()
 
+        # Wait for the server to confirm the subscription, so a permissions
+        # violation on the subject fails the search immediately.
         sub = await nc.subscribe(subject, cb=message_handler)
-        try:
-            await asyncio.wait_for(enough.wait(), timeout=duration)
-        except asyncio.TimeoutError:
-            pass
+        await connection.confirm()
+
+        # Stop early on enough messages, a late permissions violation or a
+        # dropped connection.
+        waiters = [
+            asyncio.ensure_future(event.wait())
+            for event in (enough, connection.fatal, connection.closed)
+        ]
+        await asyncio.wait(
+            waiters, timeout=duration, return_when=asyncio.FIRST_COMPLETED
+        )
+        for waiter in waiters:
+            waiter.cancel()
+        connection.raise_if_failed()
+        if connection.closed.is_set() and not enough.is_set():
+            raise nats_connection.NatsConnectError(
+                f"Connection to NATS closed: {connection.close_reason()}"
+            )
         await sub.unsubscribe()
 
         # Decode once collecting has ended, so a slow decoder does not hold up
@@ -245,59 +258,37 @@ async def _collect_messages(
                     event["decode_error"] = rendered.error
 
     finally:
-        if nc:
-            try:
-                await nc.close()
-            except Exception as e:
-                if logger:
-                    logger.warning("Failed to close NATS connection: %s", e)
+        if connection:
+            await connection.close()
         if decoder is not None:
             await decoder.close()
 
     return events
 
 
-def _get_account_config(
-    command_instance: Any, account_name: str
-) -> Optional[Dict[str, Any]]:
+def _get_account_config(command_instance, account_name):
     """
-    Retrieve account configuration from Splunk configuration using UCC patterns.
+    Retrieve account configuration (with decrypted secrets) for the command.
 
     Args:
         command_instance: The command instance
         account_name: Name of the account configuration
 
     Returns:
-        Dictionary containing account configuration or None if not found
+        Dictionary containing the account configuration
+
+    Raises:
+        NatsConnectError: If the account does not exist or cannot be read
     """
-    try:
-        # Get session key from command instance
-        session_key = getattr(command_instance, "session_key", None)
-        if not session_key:
-            # Try to get from service
-            service = getattr(command_instance, "service", None)
-            if service:
-                session_key = service.token
+    # Get session key from command instance
+    session_key = getattr(command_instance, "session_key", None)
+    if not session_key:
+        # Try to get from service
+        service = getattr(command_instance, "service", None)
+        if service:
+            session_key = service.token
 
-        if not session_key:
-            raise RuntimeError("Unable to get session key for configuration access")
+    if not session_key:
+        raise RuntimeError("Unable to get session key for configuration access")
 
-        # Use UCC configuration manager to get account details
-        cfm = conf_manager.ConfManager(
-            session_key,
-            "nats",
-            realm="__REST_CREDENTIAL__#nats#configs/conf-nats_account",
-        )
-
-        account_conf_file = cfm.get_conf("nats_account")
-        account_config = account_conf_file.get(account_name)
-
-        if not account_config:
-            return None
-
-        return dict(account_config)
-
-    except Exception as e:
-        raise ValueError(
-            f"Failed to get account configuration '{account_name}': {str(e)}"
-        )
+    return nats_connection.load_account(session_key, str(account_name))
