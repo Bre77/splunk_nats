@@ -37,10 +37,16 @@ The add-on is built with the [Splunk Add-on UCC Framework](https://splunk.github
 
 ### Sourcetypes
 
-Inputs and search commands use the same sourcetypes, with the same `source`
-(the subject or key), `host` (the connected NATS server's `host:port`) and
-`props.conf` settings (one event per message, `_time` set by the add-on rather
-than parsed from the payload):
+Inputs and search commands use the same sourcetypes, with the same `host` (the
+connected NATS server's `host:port`) and `props.conf` settings (one event per
+message, `_time` set by the add-on rather than parsed from the payload).
+
+Input events have the input as their `source` (`nats_subscribe://<name>` or
+`nats_kv://<name>`) and the message's NATS subject in the indexed field
+`nats_subject`, so `index=nats nats_subject=telemetry.*.data` is fast. KV input
+events also get `nats_kv_bucket` and `nats_kv_key` from their subject
+(`$KV.<bucket>.<key>`). `natssubscribe` results carry `nats_subject` too, with the
+subject as `source`; `natskv` results have the key as `source`.
 
 | Sourcetype | Used for | Search-time fields |
 |---|---|---|
@@ -72,6 +78,27 @@ Binary (non UTF-8) payloads are stored base64-encoded.
 2. On the **Inputs** page, create a **NATS Subscribe** or **NATS KV** input and
    select the account to use.
 3. Optionally, set a [payload decoder](#payload-decoders) on a NATS Subscribe input.
+
+## Logging and monitoring
+
+Each input and search command writes its own log in `$SPLUNK_HOME/var/log/splunk`,
+which Splunk indexes into `_internal`: `nats_subscribe_<input>.log`,
+`nats_kv_<input>.log`, `nats_natssubscribe.log` and `nats_natskv.log`. Every record
+is one line, tracebacks included, and nothing is written to `splunkd.log`.
+
+```
+index=_internal source=*nats_subscribe_telemetry.log
+index=_internal source=*nats_*.log log_level=ERROR
+```
+
+Set the level on the **Configuration** page, **Logging** tab. Running inputs pick
+up a change within a minute, without a restart.
+
+The **Monitoring Dashboard** page shows events and license usage per input,
+sourcetype, index and account, and errors by type (`exc_l`, for example
+`Connection Error`, `Authentication Error`, `Permission Error` or
+`Configuration Error`). Inputs log their event counts once a minute, whatever the
+Logging level.
 
 ## Payload decoders
 
@@ -131,11 +158,11 @@ breaking existing decoders.
 A payload is never dropped. When the decoder returns an empty line, exits, does not
 answer within 10 seconds, writes a line that is not UTF-8, or cannot be started, the
 payload is indexed as base64 with the input's own **Source Type** (`nats:message` by
-default), as it would be without a decoder. The error is logged to `splunkd.log`, the
-first at once and then at most one summary a minute:
+default), as it would be without a decoder. The error is logged to the input's log,
+the first at once and then at most one summary a minute:
 
 ```
-index=_internal sourcetype=splunkd "Decoder 'tesla' failed to decode"
+index=_internal source=*nats_subscribe_*.log "Decoder 'tesla' failed to decode"
 ```
 
 `natssubscribe` adds the error to each such result in a `decode_error` field, and
@@ -245,9 +272,9 @@ vehicle data event has one field per signal:
 so searches such as these work directly:
 
 ```
-index=nats source="*.data" VehicleSpeed=* | timechart avg(VehicleSpeed) by vin
-index=nats source="*.connectivity" | stats count by status network_interface
-index=nats source="*.alerts" | stats count by alerts{}.name
+index=nats nats_subject="*.data" VehicleSpeed=* | timechart avg(VehicleSpeed) by vin
+index=nats nats_subject="*.connectivity" | stats count by status network_interface
+index=nats nats_subject="*.alerts" | stats count by alerts{}.name
 ```
 
 Inputs keep running through connection problems: when the connection drops or
@@ -294,6 +321,11 @@ package under `output/`.
   disposable Splunk container next to a NATS server, and checks that decodable
   payloads are indexed as JSON and undecodable ones as base64 with the failure
   logged.
+- `tests/e2e/logging.sh <package.tar.gz> [image]` checks in a disposable container
+  that inputs and commands log to their own files in `_internal`, one line per
+  record and nothing through stderr, that a Logging level change reaches running
+  inputs, and that the Monitoring Dashboard's ingestion, license and error queries
+  return data.
 
 ## Continuous integration & publishing
 

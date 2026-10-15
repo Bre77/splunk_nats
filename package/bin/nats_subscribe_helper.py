@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 # Import Splunk libraries
 import nats_connection
+import nats_logging
 from nats.aio.msg import Msg
 from splunklib import modularinput as smi
 
@@ -92,7 +93,10 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
         inputs: InputDefinition object containing all input configurations
         event_writer: EventWriter object for writing events to Splunk
     """
+    session_key = inputs.metadata.get("session_key")
     for input_name, input_item in inputs.inputs.items():
+        # Splunk runs one process per input, so this is the process's log
+        nats_logging.setup_input(input_name, session_key)
         try:
             # Get input configuration
             subject = input_item.get("subject")
@@ -100,9 +104,11 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             sourcetype = input_item.get("sourcetype") or "nats:message"
 
             # Get session key for configuration access
-            session_key = inputs.metadata.get("session_key")
             if not session_key:
-                raise Exception("Unable to get session key for configuration access")
+                raise ValueError("Unable to get session key for configuration access")
+            ingestion = nats_logging.Ingestion(
+                input_name, input_item.get("index"), account
+            )
 
             # The decoder is started once and kept running across reconnects
             decoder = _create_decoder(input_item)
@@ -122,14 +128,18 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
                     event_writer=event_writer,
                     decoder=decoder,
                     decoded_sourcetype=decoded_sourcetype,
+                    input_name=input_name,
+                    ingestion=ingestion,
                 ),
                 log=logger,
                 cleanup=decoder.close if decoder is not None else None,
+                housekeeping=nats_logging.InputHousekeeping(ingestion, session_key).run,
             )
 
         except Exception as e:
-            # Log error instead of writing as event
-            logger.error(f"Failed to subscribe to NATS topic: {str(e)}")
+            nats_connection.log_failure(
+                logger, e, "%s: failed to subscribe to NATS topic", input_name
+            )
 
 
 async def _subscribe_to_nats(
@@ -139,6 +149,8 @@ async def _subscribe_to_nats(
     event_writer: smi.EventWriter,
     decoder: Optional[Decoder] = None,
     decoded_sourcetype: str = DEFAULT_SOURCETYPE,
+    input_name: str = "nats_subscribe://",
+    ingestion: Optional[nats_logging.Ingestion] = None,
 ) -> None:
     """
     Subscribe to a NATS subject on a live connection and write each message as an event.
@@ -150,6 +162,8 @@ async def _subscribe_to_nats(
         event_writer: EventWriter for outputting events
         decoder: Optional payload decoder
         decoded_sourcetype: Sourcetype for decoded events
+        input_name: The input's full name, nats_subscribe://<name>
+        ingestion: Counts the events written, for the Monitoring Dashboard
     """
     nc = connection.nc
     decode_errors = (
@@ -172,20 +186,26 @@ async def _subscribe_to_nats(
                     decode_errors.record(msg.subject, rendered.error)
 
                 # Create the Splunk event with only the message data in _raw
+                event_sourcetype = decoded_sourcetype if rendered.decoded else sourcetype
                 event = smi.Event(
                     data=rendered.raw,
                     time=time.time(),
-                    source=msg.subject,
-                    sourcetype=decoded_sourcetype if rendered.decoded else sourcetype,
+                    source=nats_logging.event_source(input_name, msg.subject),
+                    sourcetype=event_sourcetype,
                     host=connected_host,
                 )
 
                 event_writer.write_event(event)
+                if ingestion is not None:
+                    ingestion.add(event_sourcetype)
 
             except Exception as e:
-                # Log error
-                logger.error(
-                    f"Failed to process NATS message from subject '{msg.subject}': {str(e)}"
+                nats_logging.log_error(
+                    logger,
+                    "Ingestion Error",
+                    "Failed to process NATS message from subject '%s': %s",
+                    msg.subject,
+                    e,
                 )
 
         # Subscribe and wait for the server to confirm, so a permissions violation
@@ -197,7 +217,7 @@ async def _subscribe_to_nats(
         raise nats_connection.NatsConnectError(
             f"Failed to subscribe to NATS topic '{subject}': "
             f"{nats_connection.describe_error(e, connection.servers)}"
-        )
+        ) from e
 
 
 def _create_decoder(input_item: Dict[str, Any]) -> Optional[Decoder]:
@@ -211,10 +231,17 @@ def _create_decoder(input_item: Dict[str, Any]) -> Optional[Decoder]:
     try:
         decoder = Decoder(name, input_item.get("decoder_args") or "")
     except DecoderConfigError as e:
-        logger.error(f"{e}; payloads will be kept as base64")
+        nats_logging.log_error(
+            logger, "Configuration Error", "%s; payloads will be kept as base64", e
+        )
         return BrokenDecoder(name, str(e))
     try:
         decoder.check()
     except DecodeError as e:
-        logger.error(f"{e}; payloads are kept as base64 until it is in place")
+        nats_logging.log_error(
+            logger,
+            "Configuration Error",
+            "%s; payloads are kept as base64 until it is in place",
+            e,
+        )
     return decoder

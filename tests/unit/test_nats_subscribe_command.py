@@ -81,6 +81,7 @@ def test_event_matches_input_sourcetype_and_host_form():
     assert event["host"] == "nats.example:4222"
     assert event["source"] == "telemetry.VIN1.data"
     assert event["subject"] == "telemetry.VIN1.data"
+    assert event["nats_subject"] == "telemetry.VIN1.data"
     assert event["_raw"] == '{"a": 1}'
 
 

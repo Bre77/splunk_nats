@@ -213,6 +213,11 @@ def test_permissions_violation_is_reported_and_retried(start_nats_server, caplog
     assert "Permissions violation" in disconnects[0].getMessage()
     # It keeps retrying (the server-side permissions may be fixed) instead of sitting idle.
     assert inp.loads >= 2
+    # Unlike a lost connection it is an error the user must fix, labelled for the
+    # Monitoring Dashboard, and logged once rather than on every retry.
+    assert disconnects[0].levelno == logging.ERROR
+    assert disconnects[0].getMessage().startswith('exc_l="Permission Error" ')
+    assert len([r for r in disconnects if r.levelno == logging.ERROR]) == 1
 
 
 def test_backoff_is_capped_exponential_with_jitter():

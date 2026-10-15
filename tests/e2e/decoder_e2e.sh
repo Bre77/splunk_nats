@@ -106,9 +106,9 @@ raw=$(search 'index=e2e sourcetype=nats:message | head 1 | eval payload=_raw | t
 echo "undecodable payload kept as base64: $raw"
 [[ "$raw" =~ ^/wA[A-E]$ ]]
 
-# splunkd.log reaches _internal a little after the events
+# The input's log reaches _internal a little after the events
 for _ in $(seq 30); do
-  logged=$(search 'index=_internal sourcetype=splunkd "failed to decode" gzip_json "not gzip JSON" | stats count')
+  logged=$(search 'index=_internal source=*nats_subscribe_*.log "failed to decode" gzip_json "not gzip JSON" | stats count')
   [ "$logged" -ge 1 ] && break
   sleep 5
 done

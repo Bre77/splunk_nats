@@ -53,6 +53,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 # Import Splunk libraries
 import nats_connection
+import nats_logging
 from solnlib import splunk_rest_client
 from solnlib.modular_input import checkpointer
 from splunklib import modularinput as smi
@@ -138,7 +139,10 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
         inputs: InputDefinition object containing all input configurations
         event_writer: EventWriter object for writing events to Splunk
     """
+    session_key = inputs.metadata.get("session_key")
     for input_name, input_item in inputs.inputs.items():
+        # Splunk runs one process per input, so this is the process's log
+        nats_logging.setup_input(input_name, session_key)
         try:
             # Get input configuration
             bucket = input_item.get("bucket")
@@ -148,9 +152,11 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
             domain = input_item.get("domain")
 
             # Get session key for configuration access
-            session_key = inputs.metadata.get("session_key")
             if not session_key:
-                raise Exception("Unable to get session key for configuration access")
+                raise ValueError("Unable to get session key for configuration access")
+            ingestion = nats_logging.Ingestion(
+                input_name, input_item.get("index"), account
+            )
 
             checkpoint = _open_checkpoint(session_key, input_name, bucket, domain)
 
@@ -168,13 +174,17 @@ def stream_events(inputs: smi.InputDefinition, event_writer: smi.EventWriter) ->
                     event_writer=event_writer,
                     checkpoint=checkpoint,
                     domain=domain,
+                    input_name=input_name,
+                    ingestion=ingestion,
                 ),
                 log=logger,
+                housekeeping=nats_logging.InputHousekeeping(ingestion, session_key).run,
             )
 
         except Exception as e:
-            # Log error instead of writing as event
-            logger.error(f"Failed to monitor NATS KV bucket: {str(e)}")
+            nats_connection.log_failure(
+                logger, e, "%s: failed to monitor NATS KV bucket", input_name
+            )
 
 
 class Checkpoint:
@@ -317,6 +327,8 @@ async def _monitor_kv_bucket(
     event_writer: smi.EventWriter,
     checkpoint: Checkpoint,
     domain: Optional[str] = None,
+    input_name: str = "nats_kv://",
+    ingestion: Optional[nats_logging.Ingestion] = None,
 ) -> None:
     """
     Write every change in a NATS JetStream KV bucket as an event, starting after
@@ -330,6 +342,8 @@ async def _monitor_kv_bucket(
         event_writer: EventWriter for outputting events
         checkpoint: Checkpoint holding the last processed revision
         domain: Optional JetStream domain
+        input_name: The input's full name, nats_kv://<name>
+        ingestion: Counts the events written, for the Monitoring Dashboard
     """
     nc = connection.nc
 
@@ -388,7 +402,7 @@ async def _monitor_kv_bucket(
                     await asyncio.sleep(timeout)
                     continue
                 if timeout == 0:
-                    _write_batch(batch, checkpoint, event_writer)
+                    _write_batch(batch, checkpoint, event_writer, ingestion)
                     continue
             try:
                 msg = await sub.next_msg(timeout=timeout)
@@ -401,7 +415,7 @@ async def _monitor_kv_bucket(
                     smi.Event(
                         data=entry_raw(entry),
                         time=entry_time(entry),
-                        source=f"{bucket}.{entry.key}",
+                        source=nats_logging.event_source(input_name, msg.subject),
                         sourcetype=sourcetype,
                         host=connected_host,
                     )
@@ -414,7 +428,7 @@ async def _monitor_kv_bucket(
                     f"Read bucket '{bucket}' up to revision {checkpoint.revision}; "
                     "watching for changes"
                 )
-                _write_batch(batch, checkpoint, event_writer)
+                _write_batch(batch, checkpoint, event_writer, ingestion)
 
     except nats_connection.InputStopped:
         raise
@@ -425,11 +439,14 @@ async def _monitor_kv_bucket(
             detail = nats_connection.describe_error(e, connection.servers)
         raise nats_connection.NatsConnectError(
             f"Failed to monitor KV bucket '{bucket}' with pattern '{subject}': {detail}"
-        )
+        ) from e
 
 
 def _write_batch(
-    batch: List[smi.Event], checkpoint: Checkpoint, event_writer: smi.EventWriter
+    batch: List[smi.Event],
+    checkpoint: Checkpoint,
+    event_writer: smi.EventWriter,
+    ingestion: Optional[nats_logging.Ingestion] = None,
 ) -> None:
     """
     Save the checkpoint for the held events, then write them. If the save fails
@@ -447,6 +464,9 @@ def _write_batch(
         checkpoint.revision = previous if previous is not None else 0
         checkpoint.save()
         raise nats_connection.InputStopped(f"Splunk stopped reading events: {e}") from e
+    if ingestion is not None:
+        for event in batch:
+            ingestion.add(event.sourceType)
     batch.clear()
 
 
